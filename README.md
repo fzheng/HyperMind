@@ -1,6 +1,7 @@
 # hlbot
 
 ![Coverage](badges/coverage.svg)
+License: PolyForm Noncommercial 1.0.0 — non-commercial use only. See LICENSE.
 
 Single-tenant Hyperliquid BTC Perp Tracker (MVP).
 
