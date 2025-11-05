@@ -12,7 +12,7 @@
     <div class="wrap">
       <header class="site-header">
         <h1>Hyperliquid BTC Perp Tracker</h1>
-        <div class="small muted">Live BTC perp address monitoring</div>
+        <div class="small muted">BTC: <span id="btcPrice">—</span></div>
       </header>
 
       <div class="card" aria-labelledby="addressEntryTitle">
@@ -56,6 +56,7 @@
       const recsDiv = document.getElementById('recs');
       const lastUpdated = document.getElementById('lastUpdated');
       const pollNowBtn = document.getElementById('pollNowBtn');
+      const btcPriceSpan = document.getElementById('btcPrice');
 
       async function fetchAddresses() {
         const r = await fetch('/api/addresses');
@@ -65,6 +66,11 @@
       async function fetchRecs() {
         const r = await fetch('/api/recommendations');
         return (await r.json()).recommendations || [];
+      }
+
+      async function fetchPrice() {
+        const r = await fetch('/api/price');
+        return await r.json();
       }
 
       function renderAddresses(addresses) {
@@ -102,7 +108,7 @@
           row.innerHTML = `
             <div class="small muted">${r.timestamp}</div>
             <div><span class="score ${scoreClass}">Score: ${r.score.toFixed(2)}</span> — ${r.text}</div>
-            <div class="small muted">Address: ${r.address} • Exposure: ${r.exposureBtc.toFixed(4)} BTC • Price: $${r.priceUsd.toFixed(0)}</div>
+            <div class="small muted">Address: ${r.address} • Exposure: ${r.exposureBtc.toFixed(4)} BTC</div>
           `;
           recsDiv.appendChild(row);
         });
@@ -116,6 +122,18 @@
           renderRecs(recs);
         } catch (e) {
           console.error('refresh failed', e);
+        }
+      }
+
+      async function refreshPrice() {
+        try {
+          const p = await fetchPrice();
+          const price = p && typeof p.price === 'number' ? p.price : null;
+          if (price && isFinite(price)) {
+            btcPriceSpan.textContent = `$${Math.round(price).toLocaleString()}`;
+          }
+        } catch (e) {
+          // ignore
         }
       }
 
@@ -158,17 +176,17 @@
       }
 
       // Modal for holdings
-  const modal = document.createElement('div');
-  modal.className = 'modal-overlay';
-  const modalCard = document.createElement('div');
-  modalCard.className = 'modal-card';
-  modalCard.innerHTML = '<div class="row" style="justify-content:space-between; align-items:center; margin-bottom:8px;"><strong>Perp holdings</strong><button id="modalClose" aria-label="Close holdings modal">Close</button></div><div id="modalBody" class="small"></div>';
+      const modal = document.createElement('div');
+      modal.className = 'modal-overlay';
+      const modalCard = document.createElement('div');
+      modalCard.className = 'modal-card';
+      modalCard.innerHTML = '<div class="row" style="justify-content:space-between; align-items:center; margin-bottom:8px;"><strong>Perp holdings</strong><button id="modalClose" aria-label="Close holdings modal">Close</button></div><div id="modalBody" class="small"></div>';
       modal.appendChild(modalCard);
       document.body.appendChild(modal);
       document.getElementById('modalClose').addEventListener('click', () => { modal.style.display = 'none'; });
 
       async function showHoldings(address) {
-  modal.style.display = 'flex';
+        modal.style.display = 'flex';
         const body = modal.querySelector('#modalBody');
         body.textContent = 'Loading...';
         try {
@@ -205,9 +223,12 @@
         }
       }
 
-      // Initial load and polling every 10s
+      // Initial load and polling
       refresh();
       setInterval(refresh, 10_000);
+      refreshPrice();
+      setInterval(refreshPrice, 3_000);
     </script>
   </body>
   </html>
+

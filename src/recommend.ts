@@ -15,15 +15,11 @@ export function computeRecommendation(
 
   let text: string;
   if (exposureBtc === 0) {
-    text = `No open BTC perp exposure detected at ~$${priceUsd.toFixed(0)}.`;
+    text = `No open BTC perp exposure.`;
   } else if (exposureBtc > 0) {
-    text = `Net long ${exposureBtc.toFixed(4)} BTC perp at ~$${priceUsd.toFixed(
-      0
-    )}. Consider downside risk if price falls.`;
+    text = `Net long ${exposureBtc.toFixed(4)} BTC perp. Consider downside risk if price falls.`;
   } else {
-    text = `Net short ${Math.abs(exposureBtc).toFixed(4)} BTC perp at ~$${priceUsd.toFixed(
-      0
-    )}. Consider upside risk if price rises.`;
+    text = `Net short ${Math.abs(exposureBtc).toFixed(4)} BTC perp. Consider upside risk if price rises.`;
   }
 
   return {

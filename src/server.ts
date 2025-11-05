@@ -5,6 +5,7 @@ import { initStorage, listAddresses as storageList, addAddress as storageAdd, re
 import type { Address, Recommendation } from './types';
 import { Poller } from './poller';
 import { fetchPerpPositions } from './hyperliquid';
+import { startPriceFeed, refreshPriceFeed, getCurrentBtcPrice } from './price';
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
@@ -43,12 +44,17 @@ app.post('/api/addresses', async (req, res) => {
     await storageAdd(addr);
     console.log(`[api] Added address ${addr}`);
     poller.trigger().catch((e) => console.warn('[api] immediate poll failed', e));
+    refreshPriceFeed().catch((e) => console.warn('[api] price feed refresh failed', e));
   }
   res.json({ addresses: await getAddresses() });
 });
 
 app.get('/api/recommendations', (_req, res) => {
   res.json({ recommendations: getRecommendations() });
+});
+
+app.get('/api/price', (_req, res) => {
+  res.json(getCurrentBtcPrice());
 });
 
 // Remove address
@@ -58,6 +64,7 @@ app.delete('/api/addresses/:address', async (req, res) => {
   await storageRemove(addrParam);
   console.log(`[api] Removed address ${addrParam}`);
   recommendations = recommendations.filter((r) => r.address.toLowerCase() !== addrParam);
+  await refreshPriceFeed().catch((e) => console.warn('[api] price feed refresh failed', e));
   res.json({ addresses: await getAddresses() });
 });
 
@@ -97,7 +104,8 @@ const poller = new Poller(getAddresses, setRecommendations, getRecommendations, 
 poller.start();
 
 initStorage()
-  .then(() => {
+  .then(async () => {
+    await startPriceFeed(getAddresses);
     app.listen(PORT, () => {
       console.log(`hlbot server listening on http://localhost:${PORT}`);
     });
