@@ -10,7 +10,7 @@ Quick start
 - Dev run: `npm run dev` then open http://localhost:3000
 
 Features
-- Add an address to track; de-duplicated and persisted to `data/tracked.json`.
+- Add an address to track; de-duplicated and persisted via Redis or Postgres.
 - Background poller (default 90s) fetches BTC price and best-effort BTC perp exposure.
 - Recommendations computed server-side and polled by the UI every 10s.
 - Minimal single-page UI served from `/`.
@@ -18,6 +18,10 @@ Features
 Config
 - `PORT` env var to change port (default 3000).
 - `POLL_INTERVAL_MS` to change poll frequency (default 90000).
+- Storage backend (no local files):
+  - Redis: set `STORAGE_BACKEND=redis` and `REDIS_URL=redis://localhost:6379`
+  - Postgres: set `STORAGE_BACKEND=postgres` and either `PG_CONNECTION_STRING` or `DATABASE_URL`
+  - If neither is set, an in-memory backend is used (dev/tests only).
 
 Notes
 - If Hyperliquid API parsing fails, exposure falls back to 0 (neutral rec). This keeps the server robust.

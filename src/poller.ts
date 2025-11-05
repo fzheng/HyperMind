@@ -10,12 +10,12 @@ export interface PollerOpts {
 export class Poller {
   private timer: NodeJS.Timeout | null = null;
   private intervalMs: number;
-  private getAddresses: () => Address[];
+  private getAddresses: () => Promise<Address[]>;
   private setRecommendations: (recs: Recommendation[]) => void;
   private getRecommendations: () => Recommendation[];
 
   constructor(
-    getAddresses: () => Address[],
+    getAddresses: () => Promise<Address[]>,
     setRecommendations: (recs: Recommendation[]) => void,
     getRecommendations: () => Recommendation[],
     opts?: PollerOpts
@@ -46,7 +46,7 @@ export class Poller {
   }
 
   private async runOnce() {
-    const addresses = this.getAddresses();
+    const addresses = await this.getAddresses();
     if (addresses.length === 0) return;
 
     console.log(`[poller] Polling ${addresses.length} address(es)`);

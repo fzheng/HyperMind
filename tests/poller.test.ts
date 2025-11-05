@@ -13,7 +13,7 @@ describe('Poller', () => {
     const addresses = ['0xaaa', '0xbbb'];
     let recs: any[] = [];
     const poller = new Poller(
-      () => addresses,
+      async () => addresses,
       (r) => {
         recs = r;
       },
@@ -28,4 +28,3 @@ describe('Poller', () => {
     expect(recs[0].priceUsd).toBe(50000);
   });
 });
-
