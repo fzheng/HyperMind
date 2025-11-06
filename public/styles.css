@@ -109,6 +109,12 @@ header.site-header h1 {
 .score { font-weight: 600; }
 .score.positive { color: var(--good); }
 .score.negative { color: var(--bad); }
+/* Tags for direction */
+.tag { padding: 2px 6px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+.tag.long { color: #fff; background: #2ecc71; }
+.tag.short { color: #fff; background: #ff4d4f; }
+.tag.buy { color: #fff; background: #2ecc71; }
+.tag.sell { color: #fff; background: #ff4d4f; }
 /* Forms */
 .row { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
 input[type=text] {
@@ -154,6 +160,8 @@ table { width: 100%; border-collapse: collapse; }
 th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; font-size: 14px; }
 th { color: var(--muted); font-weight: 600; font-size: 11px; letter-spacing: .7px; text-transform: uppercase; }
 tr:hover td { background: rgba(255,255,255,0.03); }
+th.sortable { cursor: pointer; }
+th.sortable:hover { color: var(--fg); }
 /* Modal */
 .modal-overlay { position: fixed; inset: 0; display: none; background: rgba(0,0,0,.55); align-items: center; justify-content: center; padding: var(--space-4); z-index: 50; }
 .modal-card { background: var(--bg-alt); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: var(--space-4); width: 560px; max-width: 100%; box-shadow: 0 8px 36px -8px rgba(0,0,0,.5); animation: scaleIn .35s cubic-bezier(.4,0,.2,1); }

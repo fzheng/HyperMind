@@ -59,6 +59,14 @@ API endpoints
 - `GET /api/price` — current BTCUSD price (ws/http source info included).
 - `GET /` — static UI.
 
+Realtime changes (beta)
+- The server streams BTC position changes and trade fills into an in-memory queue.
+- Pull API: `GET /api/changes?since=<seq>&limit=<n>` returns ordered events and the next cursor.
+- Event types:
+  - `position`: `{ address, symbol: 'BTC', size (signed), side, entryPriceUsd, liquidationPriceUsd, leverage, pnlUsd, at, seq }`
+  - `trade`: `{ address, symbol: 'BTC', side: 'buy'|'sell', direction: 'long'|'short', effect: 'open'|'close', priceUsd, size, realizedPnlUsd?, at, seq }`
+- Notes: events are kept in memory (rolling buffer). Persisting or server-sent streaming can be added next.
+
 Troubleshooting
 - Port in use (3000/5432): change `APP_PORT`, `PG_PORT`, or `PORT` in `.env`.
 - DB not ready: compose waits for Postgres health. Check `docker compose logs db`.
@@ -81,3 +89,26 @@ Config
 
 Notes
 - If Hyperliquid API parsing fails, exposure falls back to 0 (neutral rec). This keeps the server robust.
+
+Realtime and trades
+- Live WS subscriptions track BTC positions and user fills per address.
+- Durable store in Postgres for trades (`hl_events`) and current positions (`hl_current_positions`).
+- Cursor pagination for trades: `GET /api/latest-trades?limit=100&beforeId=<id>&address=<0x...>` → `{ trades, nextBeforeId }`.
+- Backfill and cleanup:
+  - `POST /api/backfill` with `{ address?: string|null, limit?: number }` imports recent fills for an address or for all when `address` is null.
+  - `POST /api/cleanup-and-backfill` purges invalid trades and backfills up to 100 per tracked address.
+  - New addresses are auto‑backfilled (latest 100).
+  - Unique index on trade tx hash prevents duplicates during backfill.
+
+Additional endpoints (summary)
+- `GET /api/current-positions` — current BTC positions for all tracked addresses (with nicknames when set).
+- `GET /api/latest-trades` — stable, paginated latest trades from DB.
+- `GET /api/user-trades/:address` — recent BTC fills for a specific address (Info API).
+- `POST /api/backfill` — backfill recent fills to DB (deduped by tx hash).
+- `POST /api/cleanup-and-backfill` — cleanup invalid trades and seed latest fills for all addresses.
+- `POST /api/addresses/:address/nickname` — set/clear nickname.
+
+UI highlights
+- Positions: nickname editing, integrated address actions, and updated time column with Absolute/Relative toggle.
+- Trades: Address filter, Refresh, Load more (pagination), Backfill, Clean + Backfill actions.
+- Sorting: click table headers (positions and trades).

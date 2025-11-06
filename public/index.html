@@ -12,7 +12,7 @@
     <div class="wrap">
       <header class="site-header">
         <h1>Hyperliquid BTC Perp Tracker</h1>
-        <div class="small muted">BTC: <span id="btcPrice">—</span></div>
+        <div class="small muted">BTC: <span id="btcPrice">-</span></div>
       </header>
 
       <div class="card" aria-labelledby="addressEntryTitle">
@@ -28,23 +28,57 @@
         </div>
       </div>
 
-      <div class="card" aria-labelledby="trackedAddressesTitle">
-        <div class="flex space-between mb-2" style="align-items:center; gap:8px;">
-          <h3 id="trackedAddressesTitle" style="margin:0">Tracked addresses</h3>
-          <button id="pollNowBtn" title="Trigger an immediate server poll" aria-label="Manually refresh now">Refresh now</button>
-        </div>
-        <table>
+      <div class="card" aria-labelledby="positionsTitle">
+        <h3 id="positionsTitle" style="margin:0 0 8px">Current Positions (BTC)</h3>
+        <table style="width:100%;">
           <thead>
-            <tr><th>Address</th><th style="width:120px;">Actions</th></tr>
+            <tr>
+              <th class="sortable" data-sort="address">Address</th>
+              <th class="sortable" data-sort="side">Side</th>
+              <th class="sortable" data-sort="size">Size</th>
+              <th class="sortable" data-sort="entry">Entry</th>
+              <th class="sortable" data-sort="lev">Lev</th>
+              <th class="sortable" data-sort="liq">Liq</th>
+              <th class="sortable" data-sort="pnl">PnL</th>
+              <th class="sortable" data-sort="updated">Updated</th>
+            </tr>
           </thead>
-          <tbody id="addrTbody"></tbody>
+          <tbody id="positionsTbody"></tbody>
         </table>
       </div>
 
-      <div class="card" aria-labelledby="recommendationsTitle">
-        <h3 id="recommendationsTitle" style="margin:0 0 8px">Recommendations</h3>
-        <div id="recs" aria-live="polite"></div>
-        <div class="muted small" id="lastUpdated"></div>
+      <div class="card" aria-labelledby="tradesTitle">
+        <div class="flex space-between mb-2" style="align-items:center; gap:8px;">
+          <h3 id="tradesTitle" style="margin:0">Latest Trades (BTC)</h3>
+          <div class="row">
+            <label class="small muted" for="addrFilter">Address</label>
+            <select id="addrFilter">
+              <option value="">All</option>
+            </select>
+            <label class="small muted" for="timeModeSel">Time</label>
+            <select id="timeModeSel">
+              <option value="absolute">Absolute</option>
+              <option value="relative" selected>Relative</option>
+            </select>
+            <button id="refreshTradesBtn" aria-label="Refresh latest trades">Refresh</button>
+            <button id="loadMoreBtn" aria-label="Load older trades">Load more</button>
+            <button id="backfillBtn" aria-label="Backfill trades">Backfill</button>
+          </div>
+        </div>
+        <table style="width:100%;">
+          <thead>
+            <tr>
+              <th class="sortable" data-sort="time">Time</th>
+              <th class="sortable" data-sort="taddr">Address</th>
+              <th class="sortable" data-sort="action">Action</th>
+              <th class="sortable" data-sort="tsize">Size</th>
+              <th class="sortable" data-sort="start">Start Position</th>
+              <th class="sortable" data-sort="price">Price</th>
+              <th class="sortable" data-sort="cpnl">Closed PnL</th>
+            </tr>
+          </thead>
+          <tbody id="tradesTbody"></tbody>
+        </table>
       </div>
     </div>
 
@@ -52,20 +86,29 @@
       const addrInput = document.getElementById('addrInput');
       const addBtn = document.getElementById('addBtn');
       const addMsg = document.getElementById('addMsg');
-      const addrTbody = document.getElementById('addrTbody');
-      const recsDiv = document.getElementById('recs');
-      const lastUpdated = document.getElementById('lastUpdated');
-      const pollNowBtn = document.getElementById('pollNowBtn');
+      const positionsTbody = document.getElementById('positionsTbody');
+      const tradesTbody = document.getElementById('tradesTbody');
+      const refreshTradesBtn = document.getElementById('refreshTradesBtn');
+      const loadMoreBtn = document.getElementById('loadMoreBtn');
+      const backfillBtn = document.getElementById('backfillBtn');
+      const addrFilterSel = document.getElementById('addrFilter');
+      const timeModeSel = document.getElementById('timeModeSel');
       const btcPriceSpan = document.getElementById('btcPrice');
+      let posSort = { key: 'updated', dir: 'desc' };
+      let tradeSort = { key: 'time', dir: 'desc' };
+      let tradesState = { items: [], nextBeforeId: null };
+      let selectedAddress = '';
+      let nickMap = {};
+      let timeMode = 'relative';
 
-      async function fetchAddresses() {
-        const r = await fetch('/api/addresses');
-        return (await r.json()).addresses || [];
+      async function fetchPositions() {
+        const r = await fetch('/api/current-positions');
+        return (await r.json()).positions || [];
       }
 
-      async function fetchRecs() {
-        const r = await fetch('/api/recommendations');
-        return (await r.json()).recommendations || [];
+      async function fetchLatestTrades(limit = 50) {
+        const r = await fetch(`/api/latest-trades?limit=${limit}`);
+        return (await r.json()).trades || [];
       }
 
       async function fetchPrice() {
@@ -73,53 +116,105 @@
         return await r.json();
       }
 
-      function renderAddresses(addresses) {
-        addrTbody.innerHTML = '';
-        addresses.forEach(a => {
+      function renderPositions(positions) {
+        positions = sortPositions(positions);
+        positionsTbody.innerHTML = '';
+        positions.forEach(p => {
           const tr = document.createElement('tr');
-          const tdA = document.createElement('td');
-          const link = document.createElement('a');
-          link.href = '#';
-          link.textContent = a;
-          link.addEventListener('click', (e) => { e.preventDefault(); showHoldings(a); });
-          tdA.appendChild(link);
-
-          const tdActions = document.createElement('td');
-          const rm = document.createElement('button');
-          rm.textContent = 'Remove';
-          rm.addEventListener('click', async () => {
-            await removeAddress(a);
-            await refresh();
-          });
-          tdActions.appendChild(rm);
-
-          tr.appendChild(tdA);
-          tr.appendChild(tdActions);
-          addrTbody.appendChild(tr);
+          const sideTxt = p.side === 'long' ? '<span class="tag long">Long</span>' : (p.side === 'short' ? '<span class="tag short">Short</span>' : 'Flat');
+          const sizeTxt = Math.abs(Number(p.size || 0)).toFixed(4);
+          const entryTxt = p.entryPriceUsd ? formatUsd(Number(p.entryPriceUsd)) : '-';
+          const levTxt = p.leverage ? (Number(p.leverage).toFixed(1) + 'x') : '-';
+          const liqTxt = p.liquidationPriceUsd ? formatUsd(Number(p.liquidationPriceUsd)) : '-';
+          const pnlNum = (typeof p.pnlUsd === 'number' && isFinite(p.pnlUsd)) ? p.pnlUsd : null;
+          const pnlTxt = pnlNum !== null ? formatUsd(pnlNum) : '-';
+          const pnlClass = pnlNum !== null ? (pnlNum >= 0 ? 'score positive' : 'score negative') : '';
+          const displayName = p.nickname ? `<strong>${escapeHtml(p.nickname)}</strong><div class="small muted">${p.address}</div>` : `<span class="addr">${p.address}</span>`;
+          tr.innerHTML = `
+            <td>
+              <a href="#" class="addr" data-address="${p.address}">${displayName}</a>
+              <div class="small">
+                <a href="#" data-action="edit-nick" data-address="${p.address}" data-nick="${p.nickname || ''}">Nickname</a>
+                <span class="muted"> · </span>
+                <a href="#" data-action="remove" data-address="${p.address}">Remove</a>
+              </div>
+            </td>
+            <td>${sideTxt}</td>
+            <td>${sizeTxt}</td>
+            <td>${entryTxt}</td>
+            <td>${levTxt}</td>
+            <td>${liqTxt}</td>
+            <td class="${pnlClass}">${pnlTxt}</td>
+            <td class="small muted">${formatTime(p.updatedAt)}</td>
+          `;
+          tr.querySelector('a[data-address]')?.addEventListener('click', (e) => { e.preventDefault(); showHoldings(p.address); });
+          tr.querySelector('a[data-action="remove"]')?.addEventListener('click', async (e) => { e.preventDefault(); await removeAddress(p.address); await refresh(); });
+          tr.querySelector('a[data-action="edit-nick"]')?.addEventListener('click', async (e) => { e.preventDefault(); await editNickname(p.address, p.nickname || ''); await refresh(); });
+          positionsTbody.appendChild(tr);
         });
       }
 
-      function renderRecs(recs) {
-        recsDiv.innerHTML = '';
-        recs.forEach(r => {
-          const row = document.createElement('div');
-          row.style.marginBottom = '10px';
-          const scoreClass = r.score > 0 ? 'positive' : (r.score < 0 ? 'negative' : '');
-          row.innerHTML = `
-            <div class="small muted">${r.timestamp}</div>
-            <div><span class="score ${scoreClass}">Score: ${r.score.toFixed(2)}</span> — ${r.text}</div>
-            <div class="small muted">Address: ${r.address} • Exposure: ${r.exposureBtc.toFixed(4)} BTC</div>
+      function renderTrades(trades, { append } = { append: false }) {
+        trades = sortTrades(trades);
+        if (!append) tradesTbody.innerHTML = '';
+        trades.forEach(t => {
+          const tr = document.createElement('tr');
+          const pnl = (typeof t.closedPnl === 'number' && isFinite(t.closedPnl)) ? t.closedPnl : null;
+          const pnlTxt = pnl !== null ? formatUsd(pnl) : '-';
+          const pnlClass = pnl !== null ? (pnl >= 0 ? 'score positive' : 'score negative') : '';
+          const nick = nickMap && nickMap[t.address] ? String(nickMap[t.address]) : '';
+          const addrHtml = nick ? (`<strong>${escapeHtml(nick)}</strong><div class="small muted">${t.address}</div>`) : `<span class="addr">${t.address}</span>`;
+          tr.innerHTML = `
+            <td class="small muted">${formatTime(t.time)}</td>
+            <td>${addrHtml}</td>
+            <td>${escapeHtml(t.action || '')}</td>
+            <td>${Number(t.size).toFixed(5)}</td>
+            <td>${Number(t.startPosition ?? 0).toFixed(5)}</td>
+            <td>${formatUsd(Number(t.price))}</td>
+            <td class="${pnlClass}">${pnlTxt}</td>
           `;
-          recsDiv.appendChild(row);
+          tradesTbody.appendChild(tr);
         });
-        lastUpdated.textContent = recs.length ? `Last updated: ${new Date().toLocaleTimeString()}` : '';
+      }
+
+      function sortPositions(positions) {
+        const k = posSort.key, d = posSort.dir === 'asc' ? 1 : -1;
+        const get = {
+          address: p => p.address,
+          side: p => ({ long: 1, short: -1, flat: 0 })[p.side] || 0,
+          size: p => Number(p.size) || 0,
+          entry: p => Number(p.entryPriceUsd) || -Infinity,
+          lev: p => Number(p.leverage) || 0,
+          liq: p => Number(p.liquidationPriceUsd) || -Infinity,
+          pnl: p => Number(p.pnlUsd) || -Infinity,
+          updated: p => new Date(p.updatedAt).getTime(),
+        }[k] || ((p)=>0);
+        return positions.slice().sort((a,b)=>{
+          const av = get(a), bv = get(b);
+          if (av < bv) return -1*d; if (av > bv) return 1*d; return 0;
+        });
+      }
+      function sortTrades(trades) {
+        const k = tradeSort.key, d = tradeSort.dir === 'asc' ? 1 : -1;
+        const get = {
+          time: t => new Date(t.time).getTime(),
+          taddr: t => t.address,
+          action: t => t.action,
+          tsize: t => Number(t.size) || 0,
+          start: t => Number(t.startPosition) || 0,
+          price: t => Number(t.price) || 0,
+          cpnl: t => Number(t.closedPnl) || 0,
+        }[k] || ((t)=>0);
+        return trades.slice().sort((a,b)=>{
+          const av = get(a), bv = get(b);
+          if (av < bv) return -1*d; if (av > bv) return 1*d; return 0;
+        });
       }
 
       async function refresh() {
         try {
-          const [addrs, recs] = await Promise.all([fetchAddresses(), fetchRecs()]);
-          renderAddresses(addrs);
-          renderRecs(recs);
+          const positions = await fetchPositions();
+          renderPositions(positions);
         } catch (e) {
           console.error('refresh failed', e);
         }
@@ -130,11 +225,9 @@
           const p = await fetchPrice();
           const price = p && typeof p.price === 'number' ? p.price : null;
           if (price && isFinite(price)) {
-            btcPriceSpan.textContent = `$${Math.round(price).toLocaleString()}`;
+            btcPriceSpan.textContent = formatUsd(Number(price));
           }
-        } catch (e) {
-          // ignore
-        }
+        } catch (e) {}
       }
 
       addBtn.addEventListener('click', async () => {
@@ -161,21 +254,21 @@
         }
       });
 
-      pollNowBtn.addEventListener('click', async () => {
-        pollNowBtn.disabled = true;
-        try {
-          await fetch('/api/poll-now', { method: 'POST' });
-          await refresh();
-        } finally {
-          pollNowBtn.disabled = false;
-        }
-      });
-
       async function removeAddress(address) {
         await fetch(`/api/addresses/${encodeURIComponent(address)}`, { method: 'DELETE' });
       }
 
-      // Modal for holdings
+      async function editNickname(address, currentNick) {
+        const next = prompt('Set nickname for address', currentNick || '');
+        if (next === null) return; // cancelled
+        await fetch(`/api/addresses/${encodeURIComponent(address)}/nickname`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nickname: next })
+        });
+      }
+
+      // Modal for holdings (per address)
       const modal = document.createElement('div');
       modal.className = 'modal-overlay';
       const modalCard = document.createElement('div');
@@ -209,7 +302,7 @@
               <td>${p.symbol}</td>
               <td>${side}</td>
               <td>${Math.abs(p.size).toFixed(4)}</td>
-              <td>${p.entryPriceUsd ? ('$' + Number(p.entryPriceUsd).toFixed(0)) : '-'}</td>
+              <td>${p.entryPriceUsd ? formatUsd(Number(p.entryPriceUsd)) : '-'}</td>
               <td>${p.leverage ? Number(p.leverage).toFixed(1) + 'x' : '-'}</td>
             `;
             Array.from(tr.children).forEach(td => td.style.padding = '6px');
@@ -223,12 +316,130 @@
         }
       }
 
+      // Sorting handlers
+      document.querySelectorAll('#positionsTitle ~ table thead th.sortable').forEach(th => {
+        th.addEventListener('click', () => {
+          const key = th.getAttribute('data-sort');
+          if (posSort.key === key) posSort.dir = posSort.dir === 'asc' ? 'desc' : 'asc';
+          else { posSort.key = key; posSort.dir = 'desc'; }
+          fetchPositions().then(renderPositions).catch(()=>{});
+        });
+      });
+      document.querySelectorAll('#tradesTitle ~ table thead th.sortable').forEach(th => {
+        th.addEventListener('click', () => {
+          const key = th.getAttribute('data-sort');
+          if (tradeSort.key === key) tradeSort.dir = tradeSort.dir === 'asc' ? 'desc' : 'asc';
+          else { tradeSort.key = key; tradeSort.dir = 'desc'; }
+          renderTrades(tradesState.items);
+        });
+      });
+
       // Initial load and polling
       refresh();
-      setInterval(refresh, 10_000);
+      setInterval(refresh, 5000);
       refreshPrice();
-      setInterval(refreshPrice, 3_000);
+      setInterval(refreshPrice, 3000);
+      async function loadTradesPage({ reset } = { reset: false }) {
+        try {
+          const params = new URLSearchParams();
+          params.set('limit', '100');
+          if (!reset && tradesState.nextBeforeId) params.set('beforeId', String(tradesState.nextBeforeId));
+          if (selectedAddress) params.set('address', selectedAddress);
+          const r = await fetch('/api/latest-trades?'+params.toString());
+          const j = await r.json();
+          const items = j.trades || [];
+          const nextBeforeId = j.nextBeforeId || null;
+          if (reset) {
+            tradesState.items = items;
+            tradesState.nextBeforeId = nextBeforeId;
+            renderTrades(tradesState.items);
+          } else {
+            tradesState.items = (tradesState.items || []).concat(items);
+            tradesState.nextBeforeId = nextBeforeId;
+            renderTrades(items, { append: true });
+          }
+          loadMoreBtn.disabled = !tradesState.nextBeforeId;
+        } catch (e) { /* ignore */ }
+      }
+
+      refreshTradesBtn.addEventListener('click', () => loadTradesPage({ reset: true }));
+      loadMoreBtn.addEventListener('click', () => loadTradesPage({ reset: false }));
+      backfillBtn.addEventListener('click', async () => {
+        backfillBtn.disabled = true;
+        try {
+          // Backfill for selected address or all if none selected
+          if (selectedAddress) {
+            await fetch('/api/backfill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address: selectedAddress }) });
+          } else {
+            const doAll = confirm('Backfill all addresses (will cleanup invalid trades first)?');
+            if (doAll) {
+              await fetch('/api/cleanup-and-backfill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ limit: 100 }) });
+            }
+          }
+          await loadTradesPage({ reset: true });
+        } catch (e) { /* ignore */ } finally { backfillBtn.disabled = false; }
+      });
+      // No separate cleanup-all button; Backfill does per-address or global backfill
+      timeModeSel.addEventListener('change', () => {
+        timeMode = timeModeSel.value === 'relative' ? 'relative' : 'absolute';
+        renderTrades(tradesState.items);
+      });
+      addrFilterSel.addEventListener('change', () => {
+        selectedAddress = addrFilterSel.value;
+        loadTradesPage({ reset: true });
+      });
+      async function populateAddressFilter() {
+        try {
+          const r = await fetch('/api/addresses');
+          const j = await r.json();
+          const addresses = j.addresses || [];
+          nickMap = j.nicknames || {};
+          addrFilterSel.innerHTML = '<option value="">All</option>';
+          addresses.forEach(a => {
+            const opt = document.createElement('option');
+            const label = nickMap[a] ? `${nickMap[a]} (${a.slice(0,6)}...${a.slice(-4)})` : a;
+            opt.value = a; opt.textContent = label;
+            addrFilterSel.appendChild(opt);
+          });
+        } catch (e) {}
+      }
+      populateAddressFilter();
+      // Ensure UI reflects default time mode on load
+      if (timeModeSel) timeModeSel.value = timeMode;
+      loadTradesPage({ reset: true });
+
+      function formatUsd(n) {
+        if (typeof n !== 'number' || !isFinite(n)) return '-';
+        try {
+          return '$' + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        } catch { return '$' + n.toFixed(2); }
+      }
+      function formatTime(iso) {
+        const d = new Date(iso);
+        if (timeMode === 'relative') {
+          const diffMs = Date.now() - d.getTime();
+          const sec = Math.round(diffMs / 1000);
+          const min = Math.round(sec / 60);
+          const hr = Math.round(min / 60);
+          const day = Math.round(hr / 24);
+          if (sec < 60) return `${sec}s ago`;
+          if (min < 60) return `${min}m ago`;
+          if (hr < 24) return `${hr}h ago`;
+          return `${day}d ago`;
+        }
+        return d.toLocaleString();
+      }
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, function(c){
+          switch (c) {
+            case '&': return '&amp;';
+            case '<': return '&lt;';
+            case '>': return '&gt;';
+            case '"': return '&quot;';
+            default: return '&#39;';
+          }
+        });
+      }
     </script>
   </body>
   </html>
-

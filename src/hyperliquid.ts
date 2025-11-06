@@ -1,5 +1,5 @@
 import * as hl from '@nktkas/hyperliquid';
-import { clearinghouseState } from '@nktkas/hyperliquid/api/info';
+import { clearinghouseState, userFills } from '@nktkas/hyperliquid/api/info';
 import type { PositionInfo } from './types';
 
 // Reuse a single HTTP transport for SDK calls
@@ -48,6 +48,46 @@ export async function fetchPerpPositions(address: string): Promise<PositionInfo[
       });
     }
     return out;
+  } catch (e) {
+    return [];
+  }
+}
+
+export interface UserFill {
+  coin: string;
+  px: number;
+  sz: number;
+  side: 'B' | 'A';
+  time: number; // ms epoch
+  startPosition: number;
+  closedPnl?: number;
+  fee?: number;
+  feeToken?: string;
+  hash?: string;
+}
+
+export async function fetchUserBtcFills(address: string, opts?: { aggregateByTime?: boolean }): Promise<UserFill[]> {
+  try {
+    const fills = await userFills(
+      { transport },
+      { user: address as `0x${string}`, aggregateByTime: opts?.aggregateByTime },
+    );
+    const out: UserFill[] = [];
+    for (const f of fills || []) {
+      if (!/^btc$/i.test(String(f?.coin))) continue;
+      const px = Number(f?.px);
+      const sz = Number(f?.sz);
+      const time = Number(f?.time);
+      const start = Number(f?.startPosition);
+      const closed = f?.closedPnl != null ? Number(f?.closedPnl) : undefined;
+      const fee = f?.fee != null ? Number(f?.fee) : undefined;
+      const feeToken = typeof (f as any)?.feeToken === 'string' ? String((f as any).feeToken) : undefined;
+      const hash = typeof (f as any)?.hash === 'string' ? String((f as any).hash) : undefined;
+      const side = (f?.side === 'B' ? 'B' : 'A') as 'B' | 'A';
+      if (!Number.isFinite(px) || !Number.isFinite(sz) || !Number.isFinite(time) || !Number.isFinite(start)) continue;
+      out.push({ coin: 'BTC', px, sz, side, time, startPosition: start, closedPnl: Number.isFinite(closed!) ? closed : undefined, fee, feeToken, hash });
+    }
+    return out.sort((a, b) => b.time - a.time);
   } catch (e) {
     return [];
   }
