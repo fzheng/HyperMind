@@ -10,4 +10,3 @@ CREATE TABLE IF NOT EXISTS hl_current_positions (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS hl_current_positions_symbol_idx ON hl_current_positions (symbol);
-

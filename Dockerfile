@@ -22,7 +22,9 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/node_modules ./node_modules
 COPY package*.json ./
 COPY scripts ./scripts
-COPY migrations ./migrations
+# Migrations moved under scripts/migrations; expose env for runner
+ENV MIGRATIONS_DIR=/app/scripts/migrations
+# (Legacy root migrations directory removed)
 COPY docker/entrypoint.sh ./docker/entrypoint.sh
 
 RUN chmod +x ./docker/entrypoint.sh
