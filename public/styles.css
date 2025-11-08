@@ -259,9 +259,6 @@ body::-webkit-scrollbar { width: 10px; }
 body::-webkit-scrollbar-track { background: var(--bg); }
 body::-webkit-scrollbar-thumb { background: #1e2531; border-radius: 8px; border: 2px solid var(--bg); }
 body::-webkit-scrollbar-thumb:hover { background: #2a3442; }
-/* Recommendation rows */
-.recommendation { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #141a22; margin-bottom: 10px; transition: border-color var(--transition), background var(--transition); }
-.recommendation:hover { border-color: var(--accent-active); background: #18212b; }
 /* Status bar */
 #lastUpdated { margin-top: var(--space-2); font-style: italic; }
 /* Responsive tweaks */

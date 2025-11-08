@@ -12,7 +12,6 @@ import { WebSocketServer } from 'ws';
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
-// Poller removed (recommendations deprecated)
 const IPINFO_INTERVAL_MS = process.env.IPINFO_INTERVAL_MS ? Number(process.env.IPINFO_INTERVAL_MS) : 600_000; // 10 minutes
 
 app.use(cors());
