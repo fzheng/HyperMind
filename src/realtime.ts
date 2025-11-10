@@ -21,9 +21,10 @@ function sideFromSize(size: number): 'long' | 'short' | 'flat' {
 }
 
 export class RealtimeTracker {
-  private ws: any; // WebSocketTransport
+  private ws: any; // shared WebSocketTransport for clearinghouseState
   private http: any; // HttpTransport
-  private subs: Map<Address, { ch?: any; ue?: any }>; // clearinghouse + userEvents
+  private wsImpl: any; // WS ctor from 'ws' (lazy)
+  private subs: Map<Address, { ch?: any; ue?: any; ueTransport?: any }>; // subs + per-address UE transport
   private snapshots: Map<Address, { data: PositionSnapshot; updatedAt: string }>;
   private getAddresses: () => Promise<Address[]>;
   private q: EventQueue;
@@ -40,20 +41,27 @@ export class RealtimeTracker {
   }
 
   async start() {
+    await this.ensureSharedTransports();
+    await this.refresh();
+  }
+
+  private async ensureSharedTransports() {
+    if (!this.wsImpl) {
+      this.wsImpl = (await import('ws')).default as any;
+    }
     if (!this.ws) {
-      const WS = (await import('ws')).default as any;
-      this.ws = new (hl as any).WebSocketTransport({ reconnect: { WebSocket: WS } });
+      this.ws = new (hl as any).WebSocketTransport({ reconnect: { WebSocket: this.wsImpl } });
     }
     if (!this.http) {
       this.http = new (hl as any).HttpTransport();
     }
-    await this.refresh();
   }
 
   async stop() {
     for (const [, s] of this.subs) {
       try { await s.ch?.unsubscribe?.(); } catch {}
       try { await s.ue?.unsubscribe?.(); } catch {}
+      try { await s.ueTransport?.close?.(); } catch {}
     }
     this.subs.clear();
   }
@@ -68,6 +76,7 @@ export class RealtimeTracker {
         const s = this.subs.get(addr);
         try { await s?.ch?.unsubscribe?.(); } catch {}
         try { await s?.ue?.unsubscribe?.(); } catch {}
+        try { await s?.ueTransport?.close?.(); } catch {}
         this.subs.delete(addr);
         this.snapshots.delete(addr);
       }
@@ -82,8 +91,9 @@ export class RealtimeTracker {
   }
 
   private async subscribeAddress(addr: Address) {
+    await this.ensureSharedTransports();
     const user = addr as `0x${string}`;
-    const subs: { ch?: any; ue?: any } = {};
+    const subs: { ch?: any; ue?: any; ueTransport?: any } = {};
 
     // clearinghouseState: position snapshots and updates
     try {
@@ -99,12 +109,15 @@ export class RealtimeTracker {
 
     // userEvents: fills/trades
     try {
+      const ueTransport = new (hl as any).WebSocketTransport({ reconnect: { WebSocket: this.wsImpl } });
+      subs.ueTransport = ueTransport;
       subs.ue = await subUserEvents(
-        { transport: this.ws },
+        { transport: ueTransport },
         { user },
         (evt: any) => this.onUserEvents(addr, evt)
       );
     } catch (e) {
+      try { await subs.ueTransport?.close?.(); } catch {}
       // eslint-disable-next-line no-console
       console.warn('[realtime] userEvents sub failed for', addr, e);
     }
