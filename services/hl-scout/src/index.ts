@@ -296,6 +296,7 @@ async function main() {
     periods: LEADERBOARD_PERIODS.length ? LEADERBOARD_PERIODS : [DEFAULT_LEADERBOARD_PERIOD || 30],
     refreshMs: Number(process.env.LEADERBOARD_REFRESH_MS ?? 24 * 60 * 60 * 1000),
     pageSize: Number(process.env.LEADERBOARD_PAGE_SIZE ?? 100),
+    enrichCount: Number(process.env.LEADERBOARD_ENRICH_COUNT ?? process.env.LEADERBOARD_SELECT_COUNT ?? 12),
   };
   leaderboardService = new LeaderboardService(leaderboardOptions, async (candidate) => {
     await publishCandidate(topic, nats.js, candidate);

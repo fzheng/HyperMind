@@ -102,16 +102,18 @@ main {
 table {
   width: 100%;
   border-collapse: collapse;
-  table-layout: fixed;
+  table-layout: auto;
+  word-break: break-word;
 }
 
 th, td {
   padding: 10px;
   text-align: left;
   border-bottom: 1px solid rgba(148, 163, 184, 0.1);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  word-break: break-word;
 }
 
 th {
@@ -123,9 +125,9 @@ th {
 
 .stats-table td:first-child,
 .stats-table th:first-child {
-  width: 40%;
+  min-width: 180px;
   white-space: normal;
-  word-break: break-all;
+  word-break: break-word;
 }
 
 .stats-table tbody tr:hover {
@@ -170,6 +172,7 @@ th {
   gap: 8px;
   font-size: 0.9rem;
   width: 100%;
+  word-break: break-word;
 }
 
 .fill-meta,
@@ -184,6 +187,7 @@ th {
   text-align: right;
   min-width: 140px;
   margin-right: 8px;
+  word-break: break-word;
 }
 
 .fill-meta a {
@@ -196,11 +200,13 @@ th {
   font-size: 0.8rem;
   color: #94a3b8;
   margin-top: 2px;
+  word-break: break-word;
 }
 
 .decision-status {
   flex: 0 0 auto;
   text-align: right;
+  word-break: break-word;
 }
 
 .pill {
@@ -248,14 +254,21 @@ th {
 
 .holds-cell {
   font-weight: 600;
-  display: flex;
+  display: inline-flex;
   gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 .holding-chip {
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid currentColor;
+}
+
+.placeholder {
+  color: #94a3b8;
+  font-style: italic;
 }
 
 @media (max-width: 768px) {

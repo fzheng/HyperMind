@@ -78,9 +78,28 @@ CREATE TABLE IF NOT EXISTS hl_leaderboard_entries (
   remark TEXT,
   labels JSONB,
   metrics JSONB,
+  stat_open_positions INT,
+  stat_closed_positions INT,
+  stat_avg_pos_duration DOUBLE PRECISION,
+  stat_total_pnl DOUBLE PRECISION,
+  stat_max_drawdown DOUBLE PRECISION,
   fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS hl_leaderboard_entries_period_address_idx
   ON hl_leaderboard_entries (period_days, lower(address));
 CREATE INDEX IF NOT EXISTS hl_leaderboard_entries_period_rank_idx
   ON hl_leaderboard_entries (period_days, rank);
+
+CREATE TABLE IF NOT EXISTS hl_leaderboard_pnl_points (
+  id BIGSERIAL PRIMARY KEY,
+  period_days INT NOT NULL,
+  address TEXT NOT NULL,
+  source TEXT NOT NULL,
+  window_name TEXT NOT NULL,
+  point_ts TIMESTAMPTZ NOT NULL,
+  pnl_value DOUBLE PRECISION,
+  equity_value DOUBLE PRECISION,
+  fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS hl_leaderboard_pnl_points_period_addr_idx
+  ON hl_leaderboard_pnl_points (period_days, lower(address), window_name);

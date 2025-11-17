@@ -7,17 +7,24 @@ const symbolButtons = document.querySelectorAll('.toggle-group button');
 const periodButtons = document.querySelectorAll('.period-toggle button');
 
 const API_BASE = '/dashboard/api';
+const TOP_TABLE_LIMIT = 12;
 let fillsCache = [];
 let dashboardPeriod = 30;
 let addressMeta = {};
 
+function placeholder(text = 'No live data') {
+  return `<span class="placeholder">${text}</span>`;
+}
+
 function fmtPercent(value) {
+  if (!Number.isFinite(value)) return 'N/A';
   return `${(value * 100).toFixed(1)}%`;
 }
 
 function fmtUsdShort(value) {
-  if (!Number.isFinite(value)) return '—';
-  const sign = value >= 0 ? '+' : '-';
+  if (!Number.isFinite(value)) return 'N/A';
+  if (value === 0) return '$0';
+  const sign = value > 0 ? '+' : '-';
   const abs = Math.abs(value);
   const formatter = (num, suffix) => `${sign}$${num.toFixed(num >= 10 ? 1 : 2)}${suffix}`;
   if (abs >= 1e9) return formatter(abs / 1e9, 'B');
@@ -40,11 +47,29 @@ function shortAddress(address) {
 }
 
 function formatHolding(entry) {
-  if (!entry || !Number.isFinite(entry.size) || Math.abs(entry.size) < 0.001) return '';
-  const direction = entry.size > 0 ? 'holding-long' : 'holding-short';
-  const symbol = entry.symbol?.toUpperCase() || 'BTC';
-  if (symbol !== 'BTC' && symbol !== 'ETH') return '';
-  return `<span class="holding-chip ${direction}">${symbol}</span>`;
+  if (!entry || !Number.isFinite(entry.size) || Math.abs(entry.size) < 0.0001) {
+    return placeholder('No live position');
+  }
+  const size = Number(entry.size);
+  const symbol = (entry.symbol || '').toUpperCase();
+  const direction = size >= 0 ? 'holding-long' : 'holding-short';
+  const magnitude = Math.abs(size);
+  const precision = magnitude >= 1 ? 2 : 3;
+  const signed = `${size >= 0 ? '+' : '-'}${magnitude.toFixed(precision)} ${symbol || ''}`.trim();
+  return `<span class="holding-chip ${direction}" title="Live Hyperliquid position">${signed}</span>`;
+}
+
+function normalizeHoldings(raw = {}) {
+  const normalized = {};
+  Object.entries(raw).forEach(([addr, pos]) => {
+    if (!addr) return;
+    const key = addr.toLowerCase();
+    normalized[key] = {
+      symbol: (pos?.symbol || '').toUpperCase(),
+      size: Number(pos?.size ?? 0),
+    };
+  });
+  return normalized;
 }
 
 function formatActionLabel(fill) {
@@ -72,26 +97,44 @@ async function fetchJson(url) {
 }
 
 function renderAddresses(stats = [], profiles = {}, holdings = {}) {
-  addressTable.innerHTML = stats
-    .map(
-      (row) => `
+  const rows = (stats || []).slice(0, TOP_TABLE_LIMIT);
+  if (!rows.length) {
+    addressTable.innerHTML = `<tr><td colspan="6">${placeholder('No live leaderboard data')}</td></tr>`;
+    return;
+  }
+  addressTable.innerHTML = rows
+    .map((row) => {
+      const txCount = profiles[row.address]?.txCount || 0;
+      const winRateCell = typeof row.winRate === 'number' ? fmtPercent(row.winRate) : placeholder();
+      const drawdownCell = typeof row.statMaxDrawdown === 'number' ? fmtPercent(row.statMaxDrawdown) : placeholder();
+      const tradesValue =
+        typeof row.statClosedPositions === 'number'
+          ? row.statClosedPositions
+          : typeof row.executedOrders === 'number'
+            ? row.executedOrders
+            : null;
+      const tradesCell = tradesValue === null ? placeholder() : tradesValue;
+      const holdingKey = row.address?.toLowerCase() || '';
+      const holdingCell = holdings[holdingKey] ? formatHolding(holdings[holdingKey]) : placeholder('No live position');
+      const pnlCell = typeof row.realizedPnl === 'number' ? fmtUsdShort(row.realizedPnl) : placeholder();
+      return `
         <tr>
-          <td title="Hyperliquid tx count: ${(profiles[row.address]?.txCount) || 0}">
+          <td title="Hyperliquid tx count: ${txCount}">
             <a href="https://hyperbot.network/trader/${row.address}" target="_blank" rel="noopener noreferrer">
               ${shortAddress(row.address)}
             </a>
             ${row.remark ? `<div class="addr-remark">${row.remark}</div>` : ''}
           </td>
-          <td>${fmtPercent(row.winRate ?? 0)}</td>
-          <td>${row.executedOrders ?? row.trades ?? 0}</td>
-          <td>${(row.efficiency ?? 0).toFixed(2)}</td>
+          <td>${winRateCell}</td>
+          <td>${drawdownCell}</td>
+          <td>${tradesCell}</td>
           <td class="holds-cell">
-            ${formatHolding(holdings[row.address?.toLowerCase()]) || '—'}
+            ${holdingCell}
           </td>
-          <td>${fmtUsdShort(row.realizedPnl ?? row.pnl7d ?? 0)}</td>
+          <td>${pnlCell}</td>
         </tr>
-      `
-    )
+      `;
+    })
     .join('');
 }
 
@@ -104,16 +147,19 @@ function renderRecommendation(summary) {
   const featured = summary.featured;
   const profile = summary.profiles?.[rec.address];
   const remark = addressMeta[rec.address?.toLowerCase()]?.remark || '';
+  const winRateText = typeof rec.winRate === 'number' ? fmtPercent(rec.winRate) : 'N/A (no live data)';
+  const realizedText = typeof rec.realizedPnl === 'number' ? fmtUsdShort(rec.realizedPnl) : 'N/A (no live data)';
+  const weightText = typeof rec.weight === 'number' ? `${(rec.weight * 100).toFixed(1)}%` : 'N/A';
   recommendationCard.innerHTML = `
     <span>Focus address</span>
     <strong>${remark ? `${remark} (${shortAddress(rec.address)})` : rec.address}</strong>
-    <span>Win rate: ${fmtPercent(rec.winRate || 0)} • Realized: ${fmtUsdShort(rec.realizedPnl || 0)}</span>
+    <span>Win rate: ${winRateText} • Realized: ${realizedText}</span>
     ${
       featured
         ? `<span>Latest fill: ${featured.side.toUpperCase()} ${featured.size} @ ${featured.priceUsd}</span>`
         : ''
     }
-    <span>Weight: ${(rec.weight * 100).toFixed(1)}%</span>
+    <span>Weight: ${weightText}</span>
     ${profile ? `<span>Total HL transactions: ${profile.txCount || 0}</span>` : ''}
     <em>${rec.message}</em>
   `;
@@ -132,7 +178,7 @@ function renderFills(list) {
           </span>
           <span class="fill-stats">
             <span class="pill ${fill.side}">${fill.side === 'buy' ? 'LONG' : 'SHORT'}</span>
-            ${fill.size.toFixed(3)} @ ${fill.priceUsd}
+            <span class="fill-sub">${fill.size.toFixed(3)} @ ${fill.priceUsd}</span>
           </span>
         </li>
       `
@@ -157,11 +203,17 @@ function renderDecisions(list) {
 
 async function refreshSummary() {
   try {
-    const data = await fetchJson(`${API_BASE}/summary?period=${dashboardPeriod}`);
-    const rows = data.selected || data.stats || [];
-    const holdings = data.holdings || {};
+    const summaryUrl = `${API_BASE}/summary?period=${dashboardPeriod}&limit=${TOP_TABLE_LIMIT}`;
+    const data = await fetchJson(summaryUrl);
+    const rows = Array.isArray(data.stats)
+      ? data.stats
+      : Array.isArray(data.selected)
+        ? data.selected
+        : [];
+    const holdings = normalizeHoldings(data.holdings || {});
     addressMeta = {};
     rows.forEach((row) => {
+      if (!row?.address) return;
       addressMeta[row.address.toLowerCase()] = { remark: row.remark || null };
     });
     renderAddresses(rows, data.profiles || {}, holdings);

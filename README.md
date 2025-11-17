@@ -71,6 +71,12 @@ Run `npm run contracts:generate` to refresh bindings (automatically wired as `pr
 
 When the Postgres container receives a fresh data directory it automatically executes every `.sql` file in `docker/postgres-init/` (currently `001_base.sql`). That script creates all shared tables (`addresses`, `hl_events`, `hl_current_positions`, `marks_1m`, `tickets`, `ticket_outcomes`, `hl_leaderboard_entries`, …), so you do **not** need to run `npm run migrate`. To reset the schema, run `docker compose down -v` and bring the stack back up—Postgres will reapply the base schema during initialization.
 
+For long-running clusters, apply any new SQL under `db/migrations/` before rolling out updated containers. For example:
+
+```bash
+psql "$DATABASE_URL" -f db/migrations/002_leaderboard_stats.sql
+```
+
 ## Environment
 
 Key variables (see `.env.example`):
@@ -87,9 +93,25 @@ Key variables (see `.env.example`):
 | `LEADERBOARD_SELECT_COUNT` | `12` | Auto-tracked addresses pushed to hl-stream/hl-sage |
 | `LEADERBOARD_PERIODS` | `7,30` | Leaderboard periods (days) to crawl |
 | `LEADERBOARD_REFRESH_MS` | `86400000` | Crawl cadence (ms) |
+| `LEADERBOARD_ENRICH_COUNT` | `12` | How many ranked wallets to enrich with stats + curves per refresh |
+| `LEADERBOARD_STATS_CONCURRENCY` | `4` | Parallel Hyperbot `query-addr-stat` requests |
+| `LEADERBOARD_SERIES_CONCURRENCY` | `2` | Parallel Hyperliquid `portfolio` requests |
 | `*_PORT`         | `410{1-4}`                       | Host-forwarded HTTP ports |
 
 Compose keeps everything on an isolated bridge network and only binds owner HTTP ports to `127.0.0.1`.
+
+### Clean rebuild / restart
+
+When you want to wipe everything and start from scratch:
+
+```bash
+docker compose down -v          # stop services and drop volumes
+npm install                     # ensure deps are up to date
+npm run build                   # compile TS services
+docker compose up --build -d    # rebuild and restart the stack
+```
+
+Once `docker compose ps` shows each service as `(healthy)`, the platform is ready. If you need the demo addresses back after nuking Postgres, call `POST /admin/seed` on hl-scout with your owner token.
 
 ## Tooling
 
@@ -144,7 +166,8 @@ Open http://localhost:4102/dashboard to monitor the stack:
 
 1. Fetches the top `LEADERBOARD_TOP_N` addresses sorted by realized PnL.
 2. Computes derived metrics (win rate safety, trade efficiency, realized PnL, pnlList consistency) and scores each wallet.
-3. Persists the scored rows to `hl_leaderboard_entries`, exposes them via `/leaderboard`/`/leaderboard/selected`, and emits `a.candidates.v1` events with weights + metadata.
+3. Enriches the top `LEADERBOARD_ENRICH_COUNT` entries with Hyperbot `query-addr-stat` + Hyperliquid `portfolio` data, storing stats on `hl_leaderboard_entries` and time-series in `hl_leaderboard_pnl_points`.
+4. Persists the scored rows to `hl_leaderboard_entries`, exposes them via `/leaderboard`/`/leaderboard/selected`, and emits `a.candidates.v1` events with weights + metadata.
 
 `hl-stream` consumes the selected list (default 12 addresses) to drive realtime Hyperliquid subscriptions, while `hl-sage` combines the weights with live fills and inferred positions to publish `b.scores.v1` follow signals.
 
