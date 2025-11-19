@@ -4,6 +4,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict
 from uuid import uuid4
+from collections import OrderedDict
 
 import asyncpg
 import nats
@@ -16,10 +17,12 @@ from contracts.py.models import FillEvent, ScoreEvent, SignalEvent, OutcomeEvent
 SERVICE_NAME = "hl-decide"
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
 DB_URL = os.getenv("DATABASE_URL", "postgresql://hlbot:hlbotpassword@localhost:5432/hlbot")
+MAX_SCORES = int(os.getenv("MAX_SCORES", "500"))
+MAX_FILLS = int(os.getenv("MAX_FILLS", "500"))
 
 app = FastAPI(title="hl-decide", version="0.1.0")
-scores: Dict[str, ScoreEvent] = {}
-fills: Dict[str, FillEvent] = {}
+scores: OrderedDict[str, ScoreEvent] = OrderedDict()
+fills: OrderedDict[str, FillEvent] = OrderedDict()
 registry = CollectorRegistry()
 signal_counter = Counter("decide_signals_total", "Signals emitted", registry=registry)
 outcome_counter = Counter("decide_outcomes_total", "Outcomes emitted", registry=registry)
@@ -118,26 +121,46 @@ async def schedule_close(ticket_id: str, signal: SignalEvent):
     outcome_counter.inc()
 
 
+def enforce_limits():
+    """Enforce memory limits on scores and fills using LRU eviction."""
+    while len(scores) > MAX_SCORES:
+        scores.popitem(last=False)  # Remove oldest
+    while len(fills) > MAX_FILLS:
+        fills.popitem(last=False)  # Remove oldest
+
+
 async def handle_score(msg):
     data = ScoreEvent.model_validate_json(msg.data.decode())
+    # Move to end (most recently used)
+    if data.address in scores:
+        scores.move_to_end(data.address)
     scores[data.address] = data
+    enforce_limits()
     await emit_signal(data.address)
 
 
 async def handle_fill(msg):
     data = FillEvent.model_validate_json(msg.data.decode())
+    # Move to end (most recently used)
+    if data.address in fills:
+        fills.move_to_end(data.address)
     fills[data.address] = data
+    enforce_limits()
     await emit_signal(data.address)
 
 
 @app.on_event("startup")
 async def startup():
-    app.state.db = await asyncpg.create_pool(DB_URL)
-    app.state.nc = await nats.connect(NATS_URL)
-    app.state.js = app.state.nc.jetstream()
-    await ensure_stream(app.state.js, "HL_D", ["d.signals.v1", "d.outcomes.v1"])
-    await app.state.nc.subscribe("b.scores.v1", cb=handle_score)
-    await app.state.nc.subscribe("c.fills.v1", cb=handle_fill)
+    try:
+        app.state.db = await asyncpg.create_pool(DB_URL)
+        app.state.nc = await nats.connect(NATS_URL)
+        app.state.js = app.state.nc.jetstream()
+        await ensure_stream(app.state.js, "HL_D", ["d.signals.v1", "d.outcomes.v1"])
+        await app.state.nc.subscribe("b.scores.v1", cb=handle_score)
+        await app.state.nc.subscribe("c.fills.v1", cb=handle_fill)
+    except Exception as e:
+        print(f"[hl-decide] Fatal startup error: {e}")
+        raise
 
 
 @app.on_event("shutdown")

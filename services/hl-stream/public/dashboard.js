@@ -1,6 +1,6 @@
 const statusEl = document.getElementById('dashboard-status');
 const addressTable = document.getElementById('address-table');
-const fillsFeed = document.getElementById('fills-feed');
+const fillsTable = document.getElementById('fills-table');
 const decisionsList = document.getElementById('decisions-list');
 const recommendationCard = document.getElementById('recommendation-card');
 const symbolButtons = document.querySelectorAll('.toggle-group button');
@@ -166,23 +166,28 @@ function renderRecommendation(summary) {
 }
 
 function renderFills(list) {
-  fillsFeed.innerHTML = list
-    .map(
-      (fill) => `
-        <li>
-          <span class="fill-meta">
-            <a href="https://hyperbot.network/trader/${fill.address}" target="_blank" rel="noopener noreferrer">
-              ${fill.remark ? `${fill.remark} (${shortAddress(fill.address)})` : shortAddress(fill.address)}
-            </a>
-            <span class="fill-sub">${fmtDateTime(fill.at)} • ${formatActionLabel(fill)}</span>
-          </span>
-          <span class="fill-stats">
-            <span class="pill ${fill.side}">${fill.side === 'buy' ? 'LONG' : 'SHORT'}</span>
-            <span class="fill-sub">${fill.size.toFixed(3)} @ ${fill.priceUsd}</span>
-          </span>
-        </li>
-      `
-    )
+  fillsTable.innerHTML = list
+    .slice(0, 10)
+    .map((fill) => {
+      const symbol = (fill.symbol || 'BTC').toUpperCase();
+      const size = typeof fill.size_signed === 'number' ? `${fill.size_signed >= 0 ? '+' : ''}${fill.size_signed.toFixed(5)} ${symbol}` : '—';
+      const prev = typeof fill.previous_position === 'number' ? `${fill.previous_position.toFixed(5)} ${symbol}` : '—';
+      const price = fmtUsdShort(fill.price_usd ?? null);
+      const pnl = fmtUsdShort(fill.closed_pnl_usd ?? null);
+      const action = fill.action || '—';
+      const sideClass = action.toLowerCase().includes('short') ? 'sell' : 'buy';
+      return `
+        <tr>
+          <td>${fmtDateTime(fill.time_utc)}</td>
+          <td><a href="https://hyperbot.network/trader/${fill.address}" target="_blank" rel="noopener noreferrer">${shortAddress(fill.address)}</a></td>
+          <td><span class="pill ${sideClass}">${action}</span></td>
+          <td>${size}</td>
+          <td>${prev}</td>
+          <td>${price}</td>
+          <td>${pnl}</td>
+        </tr>
+      `;
+    })
     .join('');
 }
 
@@ -260,17 +265,22 @@ function connectWs() {
       if (Array.isArray(events)) {
         events
           .filter((e) => e.type === 'trade')
-          .forEach((e) =>
-            pushFill({
+          .forEach((e) => {
+            const symbol = e.symbol || 'BTC';
+            const sizeSigned = e.size ?? e.payload?.size ?? 0;
+            const startPos = e.startPosition ?? e.payload?.startPosition ?? null;
+            const row = {
+              time_utc: e.at,
               address: e.address,
-              at: e.at,
-              side: e.side,
-              size: e.size ?? e.payload?.size ?? 0,
-              priceUsd: e.priceUsd ?? e.payload?.priceUsd ?? 0,
-              action: e.action || e.payload?.action || null,
-              remark: addressMeta[e.address.toLowerCase()]?.remark || null
-            })
-          );
+              action: e.action || e.payload?.action || '',
+              size_signed: Number(sizeSigned),
+              previous_position: startPos != null ? Number(startPos) : null,
+              price_usd: e.priceUsd ?? e.payload?.priceUsd ?? null,
+              closed_pnl_usd: e.realizedPnlUsd ?? e.payload?.realizedPnlUsd ?? null,
+              symbol
+            };
+            pushFill(row);
+          });
       }
     } catch (err) {
       console.error('ws parse', err);

@@ -15,7 +15,7 @@ export type InsertableEvent = {
   at: string; // ISO
   address: string;
   symbol: 'BTC';
-  payload: any; // stored as JSON
+  payload: Record<string, unknown>; // stored as JSON
 };
 
 export async function insertEvent(evt: InsertableEvent): Promise<number | null> {
@@ -26,7 +26,8 @@ export async function insertEvent(evt: InsertableEvent): Promise<number | null> 
       [evt.at, evt.address, evt.type, evt.symbol, evt.payload]
     );
     return rows?.[0]?.id ?? null;
-  } catch (_e) {
+  } catch (e) {
+    console.error('[persist] insertEvent failed:', { type: evt.type, address: evt.address, error: e });
     return null;
   }
 }
@@ -65,12 +66,12 @@ export async function upsertCurrentPosition(args: {
         args.updatedAt || new Date().toISOString(),
       ]
     );
-  } catch (_e) {
-    // ignore
+  } catch (e) {
+    console.error('[persist] upsertCurrentPosition failed:', { address: args.address, error: e });
   }
 }
 
-export async function latestTrades(limit = 50): Promise<any[]> {
+export async function latestTrades(limit = 50): Promise<Record<string, unknown>[]> {
   try {
     const p = await getPool();
     const { rows } = await p.query(
@@ -84,7 +85,7 @@ export async function latestTrades(limit = 50): Promise<any[]> {
 }
 
 // Time-based pagination (preferred for chronological ordering). Optional beforeAt ISO cursor.
-export async function pageTradesByTime(opts: { limit?: number; beforeAt?: string | null; beforeId?: number | null; address?: string | null }): Promise<{ id: number; address: string; at: string; payload: any }[]> {
+export async function pageTradesByTime(opts: { limit?: number; beforeAt?: string | null; beforeId?: number | null; address?: string | null }): Promise<{ id: number; address: string; at: string; payload: Record<string, unknown> }[]> {
   const limit = Math.max(1, Math.min(500, opts.limit ?? 100));
   try {
     const p = await getPool();
@@ -102,10 +103,12 @@ export async function pageTradesByTime(opts: { limit?: number; beforeAt?: string
       params.push(opts.beforeId);
     }
     const where = clauses.length ? 'where ' + clauses.join(' and ') : '';
-    const sql = `select id, address, at, payload from hl_events ${where} order by at desc, id desc limit ${limit}`;
+    params.push(limit);
+    const sql = `select id, address, at, payload from hl_events ${where} order by at desc, id desc limit $${idx}`;
     const { rows } = await p.query(sql, params);
     return rows as any[];
-  } catch (_e) {
+  } catch (e) {
+    console.error('[persist] pageTradesByTime failed:', e);
     return [];
   }
 }
@@ -125,7 +128,7 @@ export interface InsertTradeResult {
   inserted: boolean;
 }
 
-export async function insertTradeIfNew(address: string, payload: any): Promise<InsertTradeResult> {
+export async function insertTradeIfNew(address: string, payload: Record<string, unknown>): Promise<InsertTradeResult> {
   try {
     const p = await getPool();
     const addr = address.toLowerCase();
@@ -152,36 +155,30 @@ export async function insertTradeIfNew(address: string, payload: any): Promise<I
   }
 }
 
-export async function pageTrades(opts: { limit?: number; beforeId?: number | null; address?: string | null }): Promise<{ id: number; payload: any }[]> {
+export async function pageTrades(opts: { limit?: number; beforeId?: number | null; address?: string | null }): Promise<{ id: number; payload: Record<string, unknown> }[]> {
   const limit = Math.max(1, Math.min(200, opts.limit ?? 100));
   try {
     const p = await getPool();
-    if (opts.address && opts.beforeId) {
-      const { rows } = await p.query(
-        'select id, payload from hl_events where type = $1 and address = $2 and id < $3 order by id desc limit $4',
-        ['trade', opts.address.toLowerCase(), opts.beforeId, limit]
-      );
-      return rows as any[];
-    } else if (opts.address) {
-      const { rows } = await p.query(
-        'select id, payload from hl_events where type = $1 and address = $2 order by id desc limit $3',
-        ['trade', opts.address.toLowerCase(), limit]
-      );
-      return rows as any[];
-    } else if (opts.beforeId) {
-      const { rows } = await p.query(
-        'select id, payload from hl_events where type = $1 and id < $2 order by id desc limit $3',
-        ['trade', opts.beforeId, limit]
-      );
-      return rows as any[];
-    } else {
-      const { rows } = await p.query(
-        'select id, payload from hl_events where type = $1 order by id desc limit $2',
-        ['trade', limit]
-      );
-      return rows as any[];
+    const clauses: string[] = ["type = 'trade'"];
+    const params: any[] = [];
+    let idx = 1;
+
+    if (opts.address) {
+      clauses.push(`address = $${idx++}`);
+      params.push(opts.address.toLowerCase());
     }
-  } catch (_e) {
+    if (opts.beforeId != null) {
+      clauses.push(`id < $${idx++}`);
+      params.push(opts.beforeId);
+    }
+
+    params.push(limit);
+    const where = clauses.join(' and ');
+    const sql = `select id, payload from hl_events where ${where} order by id desc limit $${idx}`;
+    const { rows } = await p.query(sql, params);
+    return rows as any[];
+  } catch (e) {
+    console.error('[persist] pageTrades failed:', e);
     return [];
   }
 }
@@ -280,7 +277,7 @@ export async function listRecentFills(limit = 25): Promise<RecentFill[]> {
         select id, address, at, payload
         from hl_events
         where type = 'trade'
-        order by at desc
+        order by at desc, id desc
         limit $1
       `,
       [Math.max(1, Math.min(200, limit))]
@@ -294,6 +291,71 @@ export async function listRecentFills(limit = 25): Promise<RecentFill[]> {
       priceUsd: Number(row.payload?.priceUsd ?? row.payload?.price ?? 0),
       realizedPnlUsd: row.payload?.realizedPnlUsd != null ? Number(row.payload?.realizedPnlUsd) : null,
       action: row.payload?.action ?? null,
+    }));
+  } catch (_e) {
+    return [];
+  }
+}
+
+export interface LiveFill {
+  time_utc: string;
+  address: string;
+  action: string;
+  size_signed: number | null;
+  previous_position: number | null;
+  price_usd: number | null;
+  closed_pnl_usd: number | null;
+  tx_hash: string | null;
+  symbol?: string | null;
+  fee?: number | null;
+  fee_token?: string | null;
+}
+
+export async function listLiveFills(limit = 25): Promise<LiveFill[]> {
+  const safeLimit = Math.max(1, Math.min(200, limit));
+  try {
+    const p = await getPool();
+    const { rows } = await p.query(
+      `
+        SELECT
+          COALESCE((payload->>'at')::timestamptz, at) AS time_utc,
+          address,
+          payload->>'action' AS action,
+          CASE payload->>'action'
+            WHEN 'Increase Long'  THEN (payload->>'size')::numeric
+            WHEN 'Decrease Short' THEN (payload->>'size')::numeric
+            WHEN 'Close Short'    THEN (payload->>'size')::numeric
+            WHEN 'Decrease Long'  THEN -(payload->>'size')::numeric
+            WHEN 'Close Long'     THEN -(payload->>'size')::numeric
+            WHEN 'Increase Short' THEN -(payload->>'size')::numeric
+            ELSE (payload->>'size')::numeric
+          END AS size_signed,
+          (payload->>'startPosition')::numeric AS previous_position,
+          (payload->>'priceUsd')::numeric      AS price_usd,
+          (payload->>'realizedPnlUsd')::numeric AS closed_pnl_usd,
+          payload->>'hash'                     AS tx_hash,
+          payload->>'symbol'                   AS symbol,
+          (payload->>'fee')::numeric           AS fee,
+          payload->>'feeToken'                 AS fee_token
+        FROM hl_events
+        WHERE type = 'trade'
+        ORDER BY time_utc DESC, id DESC
+        LIMIT $1
+      `,
+      [safeLimit]
+    );
+    return rows.map((row: any) => ({
+      time_utc: row.time_utc,
+      address: row.address,
+      action: row.action,
+      size_signed: row.size_signed != null ? Number(row.size_signed) : null,
+      previous_position: row.previous_position != null ? Number(row.previous_position) : null,
+      price_usd: row.price_usd != null ? Number(row.price_usd) : null,
+      closed_pnl_usd: row.closed_pnl_usd != null ? Number(row.closed_pnl_usd) : null,
+      tx_hash: row.tx_hash || null,
+      symbol: row.symbol || null,
+      fee: row.fee != null ? Number(row.fee) : null,
+      fee_token: row.fee_token || null,
     }));
   } catch (_e) {
     return [];

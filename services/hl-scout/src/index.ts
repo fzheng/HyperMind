@@ -26,7 +26,11 @@ import {
   nowIso,
   listRecentFills,
   listRecentDecisions,
-  fetchLatestFillForAddress
+  fetchLatestFillForAddress,
+  listLiveFills,
+  validateEthereumAddress,
+  validateAddressArray,
+  sanitizeNickname
 } from '@hl/ts-lib';
 import LeaderboardService from './leaderboard';
 
@@ -323,18 +327,25 @@ async function main() {
   });
 
   app.post('/addresses', ownerOnly, async (req, res) => {
-    const body = req.body as AddressPayload;
-    if (!body?.address) return res.status(400).json({ error: 'address required' });
-    await addAddress(body.address, body.nickname || null);
-  await publishCandidate(topic, nats.js, {
-    address: normalizeAddress(body.address),
-    source: 'backfill',
-    ts: nowIso(),
-    nickname: body.nickname || null,
-    tags: ['api'],
-    meta: { via: 'api' }
-  });
-    res.json({ ok: true });
+    try {
+      const body = req.body as AddressPayload;
+      if (!body?.address) return res.status(400).json({ error: 'address required' });
+      const validAddress = validateEthereumAddress(body.address);
+      const validNickname = sanitizeNickname(body.nickname);
+      await addAddress(validAddress, validNickname);
+      await publishCandidate(topic, nats.js, {
+        address: validAddress,
+        source: 'backfill',
+        ts: nowIso(),
+        nickname: validNickname,
+        tags: ['api'],
+        meta: { via: 'api' }
+      });
+      res.json({ ok: true });
+    } catch (err: any) {
+      logger.error('add_address_failed', { err: err?.message });
+      res.status(400).json({ error: err?.message || 'validation failed' });
+    }
   });
 
   app.delete('/addresses/:address', ownerOnly, async (req, res) => {
@@ -343,25 +354,35 @@ async function main() {
   });
 
   app.post('/admin/seed', ownerOnly, async (req, res) => {
-    const addresses: string[] = Array.isArray(req.body?.addresses) ? req.body.addresses : [];
-    if (!addresses.length) return res.status(400).json({ error: 'addresses array required' });
-    await seedAddresses(addresses);
-  for (const address of addresses) {
-    await publishCandidate(topic, nats.js, {
-      address: normalizeAddress(address),
-      source: 'seed',
-      ts: nowIso(),
-      tags: ['admin-seed'],
-      meta: { seeded: true }
-    });
-  }
-    res.json({ ok: true, count: addresses.length });
+    try {
+      const validAddresses = validateAddressArray(req.body?.addresses);
+      await seedAddresses(validAddresses);
+      for (const address of validAddresses) {
+        await publishCandidate(topic, nats.js, {
+          address,
+          source: 'seed',
+          ts: nowIso(),
+          tags: ['admin-seed'],
+          meta: { seeded: true }
+        });
+      }
+      res.json({ ok: true, count: validAddresses.length });
+    } catch (err: any) {
+      logger.error('seed_addresses_failed', { err: err?.message });
+      res.status(400).json({ error: err?.message || 'validation failed' });
+    }
   });
 
   app.post('/admin/backfill/:address', ownerOnly, async (req, res) => {
-    const address = normalizeAddress(req.params.address);
-    const inserted = await backfillRecent(address, Number(req.body?.limit) || 50);
-    res.json({ ok: true, inserted });
+    try {
+      const address = validateEthereumAddress(req.params.address);
+      const limit = Math.max(1, Math.min(500, Number(req.body?.limit) || 50));
+      const inserted = await backfillRecent(address, limit);
+      res.json({ ok: true, inserted });
+    } catch (err: any) {
+      logger.error('backfill_failed', { err: err?.message });
+      res.status(400).json({ error: err?.message || 'validation failed' });
+    }
   });
 
   app.post('/admin/leaderboard/refresh', ownerOnly, async (_req, res) => {
@@ -448,25 +469,8 @@ async function main() {
 
   app.get('/dashboard/fills', async (req, res) => {
     const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 25));
-    const period = parsePeriod(req.query.period);
-    const fills = await listRecentFills(limit);
-    const remarkMap = new Map<string, string>();
-    if (leaderboardService) {
-      const cohort = await leaderboardService.getSelected(
-        period,
-        Number(process.env.LEADERBOARD_SELECT_COUNT ?? 12)
-      );
-      for (const entry of cohort) {
-        if (entry.remark) {
-          remarkMap.set(entry.address.toLowerCase(), entry.remark);
-        }
-      }
-    }
-    const enriched = fills.map((fill) => ({
-      ...fill,
-      remark: remarkMap.get(fill.address.toLowerCase()) || null,
-    }));
-    res.json({ fills: enriched });
+    const fills = await listLiveFills(limit);
+    res.json({ fills });
   });
 
   app.get('/dashboard/decisions', async (req, res) => {

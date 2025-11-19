@@ -162,6 +162,9 @@ async function publishFillFromEvent(
 
 function configureWebSocket(server: http.Server) {
   const wss = new WebSocketServer({ server, path: '/ws' });
+  let pingInterval: NodeJS.Timeout | null = null;
+  let broadcastInterval: NodeJS.Timeout | null = null;
+
   wss.on('connection', (ws) => {
     const client = { ws, lastSeq: 0, alive: true };
     clients.add(client);
@@ -183,33 +186,54 @@ function configureWebSocket(server: http.Server) {
     });
     ws.on('pong', () => { client.alive = true; });
     ws.on('close', () => { clients.delete(client); });
+    ws.on('error', () => { clients.delete(client); });
   });
 
-  setInterval(() => {
+  pingInterval = setInterval(() => {
     for (const client of clients) {
       if (!client.alive) {
-        try { client.ws.terminate(); } catch {}
         clients.delete(client);
+        try { client.ws.terminate(); } catch (e) {
+          logger.warn('ws_terminate_failed', { error: e });
+        }
         continue;
       }
       client.alive = false;
-      try { client.ws.ping(); } catch {}
+      try { client.ws.ping(); } catch (e) {
+        logger.warn('ws_ping_failed', { error: e });
+        clients.delete(client);
+      }
     }
   }, 30000);
 
   const broadcast = () => {
     if (!clients.size) return;
     for (const client of clients) {
-      if (client.ws.readyState !== WebSocket.OPEN) continue;
+      if (client.ws.readyState !== WebSocket.OPEN) {
+        clients.delete(client);
+        continue;
+      }
       const events = queue.listSince(client.lastSeq, 200);
       if (events.length) {
         client.lastSeq = events[events.length - 1].seq;
-        client.ws.send(JSON.stringify({ type: 'events', events }));
+        try {
+          client.ws.send(JSON.stringify({ type: 'events', events }));
+        } catch (e) {
+          logger.warn('ws_send_failed', { error: e });
+          clients.delete(client);
+        }
       }
     }
   };
 
-  setInterval(broadcast, 1000);
+  broadcastInterval = setInterval(broadcast, 1000);
+
+  // Cleanup on server shutdown
+  process.on('SIGTERM', () => {
+    if (pingInterval) clearInterval(pingInterval);
+    if (broadcastInterval) clearInterval(broadcastInterval);
+    wss.close();
+  });
 }
 
 async function main() {

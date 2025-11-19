@@ -61,7 +61,20 @@
       <section class="grid-2">
         <div class="card">
           <h3>Live Fills</h3>
-          <ul class="fills-list" id="fills-feed"></ul>
+          <table class="stats-table fills-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Address</th>
+                <th>Action</th>
+                <th>Size</th>
+                <th>Previous Position</th>
+                <th>Price</th>
+                <th>Closed PnL</th>
+              </tr>
+            </thead>
+            <tbody id="fills-table"></tbody>
+          </table>
         </div>
         <div class="card">
           <h3>Decisions</h3>

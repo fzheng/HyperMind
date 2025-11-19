@@ -180,8 +180,9 @@ export class RealtimeTracker {
           leverage: snapshot.leverage,
           pnlUsd: pnl,
         });
-        void insertEvent({ type: 'position', at: evt.at, address: addr, symbol: 'BTC', payload: evt });
-        void upsertCurrentPosition({
+        insertEvent({ type: 'position', at: evt.at, address: addr, symbol: 'BTC', payload: evt })
+          .catch((err) => console.error('[realtime] insertEvent failed:', err));
+        upsertCurrentPosition({
           address: addr,
           symbol: 'BTC',
           size: snapshot.size,
@@ -190,7 +191,7 @@ export class RealtimeTracker {
           leverage: snapshot.leverage,
           pnlUsd: pnl,
           updatedAt,
-        });
+        }).catch((err) => console.error('[realtime] upsertCurrentPosition failed:', err));
       }
     } catch (e) {
       // eslint-disable-next-line no-console
@@ -384,8 +385,9 @@ export class RealtimeTracker {
         leverage: snapshot.leverage,
         pnlUsd: pnl,
       });
-      void insertEvent({ type: 'position', at: evt.at, address: addr, symbol: 'BTC', payload: evt });
-      void upsertCurrentPosition({
+      insertEvent({ type: 'position', at: evt.at, address: addr, symbol: 'BTC', payload: evt })
+        .catch((err) => console.error('[realtime] performPrime insertEvent failed:', err));
+      upsertCurrentPosition({
         address: addr,
         symbol: 'BTC',
         size: snapshot.size,
@@ -394,9 +396,9 @@ export class RealtimeTracker {
         leverage: snapshot.leverage,
         pnlUsd: pnl,
         updatedAt,
-      });
-    } catch (_e) {
-      // ignore
+      }).catch((err) => console.error('[realtime] performPrime upsertCurrentPosition failed:', err));
+    } catch (e) {
+      console.error('[realtime] performPrime failed:', { address: addr, error: e });
     }
   }
 

@@ -1,6 +1,7 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Any
+from collections import OrderedDict
 
 import nats
 from fastapi import FastAPI, HTTPException, Query
@@ -12,10 +13,15 @@ from contracts.py.models import CandidateEvent, ScoreEvent, FillEvent
 SERVICE_NAME = "hl-sage"
 OWNER_TOKEN = os.getenv("OWNER_TOKEN", "dev-owner")
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
+MAX_TRACKED_ADDRESSES = int(os.getenv("MAX_TRACKED_ADDRESSES", "1000"))
+MAX_SCORES = int(os.getenv("MAX_SCORES", "500"))
+STALE_THRESHOLD_HOURS = int(os.getenv("STALE_THRESHOLD_HOURS", "24"))
 
 app = FastAPI(title="hl-sage", version="0.1.0")
-scores: Dict[str, ScoreEvent] = {}
-tracked_addresses: Dict[str, Dict[str, Any]] = {}
+
+# Use OrderedDict for LRU behavior
+scores: OrderedDict[str, ScoreEvent] = OrderedDict()
+tracked_addresses: OrderedDict[str, Dict[str, Any]] = OrderedDict()
 
 registry = CollectorRegistry()
 candidate_counter = Counter(
@@ -36,6 +42,27 @@ async def ensure_stream(js, name: str, subjects: List[str]) -> None:
         await js.add_stream(name=name, subjects=subjects)
 
 
+def evict_stale_entries():
+    """Remove stale entries to prevent unbounded memory growth."""
+    now = datetime.utcnow()
+    stale_cutoff = now - timedelta(hours=STALE_THRESHOLD_HOURS)
+
+    # Remove stale tracked addresses
+    stale_addrs = [
+        addr for addr, data in tracked_addresses.items()
+        if data.get("updated", now) < stale_cutoff
+    ]
+    for addr in stale_addrs:
+        tracked_addresses.pop(addr, None)
+
+    # Enforce max limits using LRU (OrderedDict maintains insertion order)
+    while len(tracked_addresses) > MAX_TRACKED_ADDRESSES:
+        tracked_addresses.popitem(last=False)  # Remove oldest
+
+    while len(scores) > MAX_SCORES:
+        scores.popitem(last=False)  # Remove oldest
+
+
 async def handle_candidate(msg):
     with score_latency.time():
         data = CandidateEvent.model_validate_json(msg.data.decode())
@@ -45,7 +72,13 @@ async def handle_candidate(msg):
         weight = max(0.05, min(1.0, weight))
         rank = int(leaderboard_meta.get("rank") or 999)
         period = int(leaderboard_meta.get("period_days") or 30)
-        tracked_addresses[data.address.lower()] = {
+
+        addr_lower = data.address.lower()
+        # Move to end (most recently used)
+        if addr_lower in tracked_addresses:
+            tracked_addresses.move_to_end(addr_lower)
+
+        tracked_addresses[addr_lower] = {
             "weight": weight,
             "rank": rank,
             "period": period,
@@ -53,15 +86,24 @@ async def handle_candidate(msg):
             "updated": datetime.utcnow(),
         }
 
+        evict_stale_entries()
+
 
 async def handle_fill(msg):
     data = FillEvent.model_validate_json(msg.data.decode())
-    state = tracked_addresses.get(data.address.lower())
+    addr_lower = data.address.lower()
+    state = tracked_addresses.get(addr_lower)
     if not state:
         return
+
+    # Move to end (most recently used)
+    if addr_lower in tracked_addresses:
+        tracked_addresses.move_to_end(addr_lower)
+
     side_multiplier = 1 if data.side == "buy" else -1
     delta = side_multiplier * float(data.size or 0)
     state["position"] = state.get("position", 0.0) + delta
+    state["updated"] = datetime.utcnow()
     base_score = max(-1.0, min(1.0, state["weight"] * side_multiplier))
     event = ScoreEvent(
         address=data.address,
@@ -77,6 +119,11 @@ async def handle_fill(msg):
             "fill": data.model_dump(),
         },
     )
+
+    # Move to end (most recently used)
+    if data.address in scores:
+        scores.move_to_end(data.address)
+
     scores[data.address] = event
     await app.state.js.publish(
         "b.scores.v1",
@@ -87,11 +134,15 @@ async def handle_fill(msg):
 
 @app.on_event("startup")
 async def startup_event():
-    app.state.nc = await nats.connect(NATS_URL)
-    app.state.js = app.state.nc.jetstream()
-    await ensure_stream(app.state.js, "HL_B", ["b.scores.v1"])
-    await app.state.nc.subscribe("a.candidates.v1", cb=handle_candidate)
-    await app.state.nc.subscribe("c.fills.v1", cb=handle_fill)
+    try:
+        app.state.nc = await nats.connect(NATS_URL)
+        app.state.js = app.state.nc.jetstream()
+        await ensure_stream(app.state.js, "HL_B", ["b.scores.v1"])
+        await app.state.nc.subscribe("a.candidates.v1", cb=handle_candidate)
+        await app.state.nc.subscribe("c.fills.v1", cb=handle_fill)
+    except Exception as e:
+        print(f"[hl-sage] Fatal startup error: {e}")
+        raise
 
 
 @app.on_event("shutdown")

@@ -329,9 +329,15 @@ export class LeaderboardService {
     hyperliquidSeries: Map<string, PortfolioWindowSeries[]>
   ): Promise<void> {
     const pool = await getPool();
-    await pool.query('DELETE FROM hl_leaderboard_entries WHERE period_days = $1', [period]);
-    await pool.query('DELETE FROM hl_leaderboard_pnl_points WHERE period_days = $1', [period]);
-    if (!entries.length) return;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM hl_leaderboard_entries WHERE period_days = $1', [period]);
+      await client.query('DELETE FROM hl_leaderboard_pnl_points WHERE period_days = $1', [period]);
+      if (!entries.length) {
+        await client.query('COMMIT');
+        return;
+      }
     const chunkSize = 100;
     for (let i = 0; i < entries.length; i += chunkSize) {
       const chunk = entries.slice(i, i + chunkSize);
@@ -370,7 +376,7 @@ export class LeaderboardService {
             `($${idx * 18 + 1}, $${idx * 18 + 2}, $${idx * 18 + 3}, $${idx * 18 + 4}, $${idx * 18 + 5}, $${idx * 18 + 6}, $${idx * 18 + 7}, $${idx * 18 + 8}, $${idx * 18 + 9}, $${idx * 18 + 10}, $${idx * 18 + 11}, $${idx * 18 + 12}, $${idx * 18 + 13}, $${idx * 18 + 14}, $${idx * 18 + 15}, $${idx * 18 + 16}, $${idx * 18 + 17}, $${idx * 18 + 18})`
         )
         .join(',');
-      await pool.query(
+      await client.query(
         `
         INSERT INTO hl_leaderboard_entries (
           period_days, address, rank, score, weight, win_rate, executed_orders,
@@ -378,16 +384,43 @@ export class LeaderboardService {
           stat_open_positions, stat_closed_positions, stat_avg_pos_duration, stat_total_pnl, stat_max_drawdown
         )
         VALUES ${placeholders}
+        ON CONFLICT (period_days, lower(address)) DO UPDATE SET
+          rank = EXCLUDED.rank,
+          score = EXCLUDED.score,
+          weight = EXCLUDED.weight,
+          win_rate = EXCLUDED.win_rate,
+          executed_orders = EXCLUDED.executed_orders,
+          realized_pnl = EXCLUDED.realized_pnl,
+          pnl_consistency = EXCLUDED.pnl_consistency,
+          efficiency = EXCLUDED.efficiency,
+          remark = EXCLUDED.remark,
+          labels = EXCLUDED.labels,
+          metrics = EXCLUDED.metrics,
+          stat_open_positions = EXCLUDED.stat_open_positions,
+          stat_closed_positions = EXCLUDED.stat_closed_positions,
+          stat_avg_pos_duration = EXCLUDED.stat_avg_pos_duration,
+          stat_total_pnl = EXCLUDED.stat_total_pnl,
+          stat_max_drawdown = EXCLUDED.stat_max_drawdown,
+          fetched_at = now()
       `,
         values
       );
     }
     if (tracked.length) {
-      await this.insertPnlPoints(period, tracked, hyperliquidSeries);
+      await this.insertPnlPointsInTransaction(client, period, tracked, hyperliquidSeries);
+    }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      this.logger.error('leaderboard_persist_failed', { period, err: err instanceof Error ? err.message : String(err) });
+      throw err;
+    } finally {
+      client.release();
     }
   }
 
-  private async insertPnlPoints(
+  private async insertPnlPointsInTransaction(
+    client: any,
     period: number,
     tracked: RankedEntry[],
     hyperliquidSeries: Map<string, PortfolioWindowSeries[]>
@@ -441,7 +474,6 @@ export class LeaderboardService {
 
     if (!points.length) return;
 
-    const pool = await getPool();
     const chunkSize = 400;
     for (let i = 0; i < points.length; i += chunkSize) {
       const chunk = points.slice(i, i + chunkSize);
@@ -460,7 +492,7 @@ export class LeaderboardService {
             `($${idx * 7 + 1}, $${idx * 7 + 2}, $${idx * 7 + 3}, $${idx * 7 + 4}, $${idx * 7 + 5}, $${idx * 7 + 6}, $${idx * 7 + 7})`
         )
         .join(',');
-      await pool.query(
+      await client.query(
         `
           INSERT INTO hl_leaderboard_pnl_points (
             period_days, address, source, window_name, point_ts, pnl_value, equity_value
