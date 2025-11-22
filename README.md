@@ -122,6 +122,28 @@ Once `docker compose ps` shows each service as `(healthy)`, the platform is read
 | `npm run dev:stream`   | Watch mode for hl-stream |
 | `npm run contracts:generate` | Rebuild zod/pydantic bindings |
 | `npm run e2e-smoke`    | Seed + wait for Candidate→Outcome flow |
+| `npm run docker:rebuild` | Full rebuild: stop containers, build fresh images (no cache), start |
+| `npm run docker:up`    | Start all Docker containers |
+| `npm run docker:down`  | Stop all Docker containers |
+| `npm run docker:logs`  | Follow container logs |
+| `npm run docker:ps`    | Show container status |
+
+### Docker Commands
+
+For quick container management without typing full `docker compose` commands:
+
+```bash
+npm run docker:rebuild   # Tear down, clean build, restart with latest code
+npm run docker:up        # Start containers
+npm run docker:down      # Stop containers
+npm run docker:logs      # Tail all logs
+npm run docker:ps        # Check status
+```
+
+The `docker:rebuild` command is useful when you want to ensure all containers are rebuilt from scratch with your latest code changes. It runs:
+```bash
+docker compose down && docker compose build --no-cache && docker compose up -d
+```
 
 ## Service Notes
 

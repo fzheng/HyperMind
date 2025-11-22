@@ -439,3 +439,153 @@ export async function fetchLatestFillForAddress(address: string): Promise<Recent
     return null;
   }
 }
+
+// =====================
+// Custom Accounts Management
+// =====================
+
+const MAX_CUSTOM_ACCOUNTS = 3;
+
+export interface CustomAccount {
+  id: number;
+  address: string;
+  nickname: string | null;
+  addedAt: string;
+}
+
+/**
+ * Get all custom accounts (max 3)
+ */
+export async function listCustomAccounts(): Promise<CustomAccount[]> {
+  try {
+    const p = await getPool();
+    const { rows } = await p.query(
+      `SELECT id, address, nickname, added_at FROM hl_custom_accounts ORDER BY added_at ASC`
+    );
+    return rows.map((row: Record<string, unknown>) => ({
+      id: Number(row.id),
+      address: String(row.address),
+      nickname: row.nickname ? String(row.nickname) : null,
+      addedAt: String(row.added_at),
+    }));
+  } catch (e) {
+    console.error('[persist] listCustomAccounts failed:', e);
+    return [];
+  }
+}
+
+/**
+ * Add a custom account (max 3 allowed)
+ * @returns The added account or null if limit reached or duplicate
+ */
+export async function addCustomAccount(
+  address: string,
+  nickname?: string | null
+): Promise<{ success: boolean; account?: CustomAccount; error?: string }> {
+  try {
+    const p = await getPool();
+    const normalizedAddress = address.toLowerCase();
+
+    // Check current count
+    const { rows: countRows } = await p.query('SELECT COUNT(*) as cnt FROM hl_custom_accounts');
+    const currentCount = Number(countRows[0]?.cnt ?? 0);
+
+    if (currentCount >= MAX_CUSTOM_ACCOUNTS) {
+      return { success: false, error: `Maximum of ${MAX_CUSTOM_ACCOUNTS} custom accounts allowed` };
+    }
+
+    // Insert the account
+    const { rows } = await p.query(
+      `INSERT INTO hl_custom_accounts (address, nickname)
+       VALUES ($1, $2)
+       ON CONFLICT (lower(address)) DO NOTHING
+       RETURNING id, address, nickname, added_at`,
+      [normalizedAddress, nickname || null]
+    );
+
+    if (!rows.length) {
+      return { success: false, error: 'Account already exists' };
+    }
+
+    return {
+      success: true,
+      account: {
+        id: Number(rows[0].id),
+        address: String(rows[0].address),
+        nickname: rows[0].nickname ? String(rows[0].nickname) : null,
+        addedAt: String(rows[0].added_at),
+      },
+    };
+  } catch (e) {
+    console.error('[persist] addCustomAccount failed:', e);
+    return { success: false, error: 'Failed to add account' };
+  }
+}
+
+/**
+ * Remove a custom account by address
+ */
+export async function removeCustomAccount(address: string): Promise<boolean> {
+  try {
+    const p = await getPool();
+    const { rowCount } = await p.query(
+      'DELETE FROM hl_custom_accounts WHERE lower(address) = $1',
+      [address.toLowerCase()]
+    );
+    return (rowCount ?? 0) > 0;
+  } catch (e) {
+    console.error('[persist] removeCustomAccount failed:', e);
+    return false;
+  }
+}
+
+/**
+ * Get count of custom accounts
+ */
+export async function getCustomAccountCount(): Promise<number> {
+  try {
+    const p = await getPool();
+    const { rows } = await p.query('SELECT COUNT(*) as cnt FROM hl_custom_accounts');
+    return Number(rows[0]?.cnt ?? 0);
+  } catch (_e) {
+    return 0;
+  }
+}
+
+/**
+ * Check if an address is a custom account
+ */
+export async function isCustomAccount(address: string): Promise<boolean> {
+  try {
+    const p = await getPool();
+    const { rows } = await p.query(
+      'SELECT 1 FROM hl_custom_accounts WHERE lower(address) = $1 LIMIT 1',
+      [address.toLowerCase()]
+    );
+    return rows.length > 0;
+  } catch (_e) {
+    return false;
+  }
+}
+
+// =====================
+// Leaderboard Refresh Timestamp
+// =====================
+
+/**
+ * Get the last refresh timestamp for a period
+ */
+export async function getLastRefreshTime(period: number): Promise<string | null> {
+  try {
+    const p = await getPool();
+    const { rows } = await p.query(
+      `SELECT MAX(fetched_at) as last_refresh
+       FROM hl_leaderboard_entries
+       WHERE period_days = $1`,
+      [period]
+    );
+    return rows[0]?.last_refresh ? String(rows[0].last_refresh) : null;
+  } catch (_e) {
+    return null;
+  }
+}

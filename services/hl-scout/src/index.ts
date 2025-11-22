@@ -30,7 +30,12 @@ import {
   listLiveFills,
   validateEthereumAddress,
   validateAddressArray,
-  sanitizeNickname
+  sanitizeNickname,
+  listCustomAccounts,
+  addCustomAccount,
+  removeCustomAccount,
+  getCustomAccountCount,
+  getLastRefreshTime
 } from '@hl/ts-lib';
 import LeaderboardService from './leaderboard';
 
@@ -413,14 +418,92 @@ async function main() {
   app.get('/dashboard/summary', async (req, res) => {
     if (!leaderboardService) return res.status(503).json({ error: 'leaderboard unavailable' });
     const period = parsePeriod(req.query.period);
-    const limit = Number(req.query.limit ?? process.env.LEADERBOARD_SELECT_COUNT ?? 12);
-    const selected = await leaderboardService.getSelected(
-      period,
-      Math.max(1, Math.min(limit, Number(process.env.LEADERBOARD_SELECT_COUNT ?? 12)))
+    const systemLimit = 10; // Always get top 10 system accounts
+    const selected = await leaderboardService.getSelected(period, systemLimit);
+
+    // Get custom accounts
+    const customAccounts = await listCustomAccounts();
+    const customAddressSet = new Set(customAccounts.map((a) => a.address.toLowerCase()));
+
+    // Mark system accounts and filter out any that are also custom
+    const systemEntries = selected
+      .filter((entry) => !customAddressSet.has(entry.address.toLowerCase()))
+      .slice(0, systemLimit)
+      .map((entry) => ({
+        ...entry,
+        isCustom: false,
+      }));
+
+    // For custom accounts, try to get their leaderboard stats
+    const customEntries = await Promise.all(
+      customAccounts.map(async (custom) => {
+        // Try to find in leaderboard entries
+        const pool = await getPool();
+        const { rows } = await pool.query(
+          `SELECT * FROM hl_leaderboard_entries
+           WHERE period_days = $1 AND lower(address) = $2
+           LIMIT 1`,
+          [period, custom.address.toLowerCase()]
+        );
+        if (rows.length) {
+          const row = rows[0];
+          return {
+            address: custom.address,
+            rank: 0, // Will be re-ranked
+            score: Number(row.score ?? 0),
+            weight: 0,
+            winRate: Number(row.win_rate ?? 0),
+            executedOrders: Number(row.executed_orders ?? 0),
+            realizedPnl: Number(row.realized_pnl ?? 0),
+            efficiency: Number(row.efficiency ?? 0),
+            pnlConsistency: Number(row.pnl_consistency ?? 0),
+            remark: custom.nickname || row.remark || null,
+            labels: row.labels || [],
+            statOpenPositions: row.stat_open_positions,
+            statClosedPositions: row.stat_closed_positions,
+            statAvgPosDuration: row.stat_avg_pos_duration,
+            statTotalPnl: row.stat_total_pnl,
+            statMaxDrawdown: row.stat_max_drawdown,
+            meta: row.metrics || {},
+            isCustom: true,
+          };
+        }
+        // No leaderboard entry found - return minimal data
+        return {
+          address: custom.address,
+          rank: 0,
+          score: 0,
+          weight: 0,
+          winRate: 0,
+          executedOrders: 0,
+          realizedPnl: 0,
+          efficiency: 0,
+          pnlConsistency: 0,
+          remark: custom.nickname || null,
+          labels: [],
+          statOpenPositions: null,
+          statClosedPositions: null,
+          statAvgPosDuration: null,
+          statTotalPnl: null,
+          statMaxDrawdown: null,
+          meta: {},
+          isCustom: true,
+        };
+      })
     );
-    const stats = selected;
-    const top = selected[0] ?? stats[0] ?? null;
+
+    // Merge and re-rank all entries by score
+    const allEntries = [...systemEntries, ...customEntries];
+    allEntries.sort((a, b) => b.score - a.score);
+    allEntries.forEach((entry, idx) => {
+      entry.rank = idx + 1;
+    });
+
+    const stats = allEntries;
+    const top = allEntries[0] ?? null;
     const featured = top ? await fetchLatestFillForAddress(top.address) : null;
+
+    // Get profiles for top entries
     const profileEntries = await Promise.all(
       stats.slice(0, 5).map(async (row) => ({
         address: row.address,
@@ -431,12 +514,14 @@ async function main() {
     for (const entry of profileEntries) {
       profiles[entry.address] = entry.profile;
     }
+
+    // Get holdings for all accounts
     const holdings: Record<string, { symbol: string; size: number }> = {};
-    if (selected.length) {
+    if (allEntries.length) {
       const pool = await getPool();
       const { rows } = await pool.query(
         'select address, symbol, size from hl_current_positions where lower(address) = any($1)',
-        [selected.map((s) => s.address.toLowerCase())]
+        [allEntries.map((s) => s.address.toLowerCase())]
       );
       for (const row of rows) {
         const addr = String(row.address || '').toLowerCase();
@@ -447,12 +532,20 @@ async function main() {
         };
       }
     }
+
+    // Get last refresh timestamp
+    const lastRefresh = await getLastRefreshTime(period);
+
     res.json({
       period,
       stats,
-      selected,
+      selected: allEntries,
       featured,
       holdings,
+      lastRefresh,
+      lastRefreshFormatted: lastRefresh ? new Date(lastRefresh).toISOString() : null,
+      customAccountCount: customAccounts.length,
+      maxCustomAccounts: 3,
       recommendation: top
         ? {
             address: top.address,
@@ -460,6 +553,7 @@ async function main() {
             realizedPnl: top.realizedPnl,
             weight: top.weight,
             rank: top.rank,
+            isCustom: top.isCustom,
             message: `Route new fills for ${top.address} (rank #${top.rank})`,
           }
         : null,
@@ -487,6 +581,133 @@ async function main() {
     } catch (err: any) {
       logger.error('price_fetch_failed', { err: err?.message });
       res.status(502).json({ error: 'price_fetch_failed' });
+    }
+  });
+
+  // =====================
+  // Custom Accounts API
+  // =====================
+
+  // Get all custom accounts
+  app.get('/custom-accounts', async (_req, res) => {
+    try {
+      const accounts = await listCustomAccounts();
+      const count = accounts.length;
+      res.json({ accounts, count, maxAllowed: 3 });
+    } catch (err: any) {
+      logger.error('custom_accounts_list_failed', { err: err?.message });
+      res.status(500).json({ error: 'Failed to list custom accounts' });
+    }
+  });
+
+  // Add a custom account
+  app.post('/custom-accounts', async (req, res) => {
+    try {
+      const { address, nickname } = req.body;
+      if (!address || typeof address !== 'string') {
+        res.status(400).json({ error: 'Address is required' });
+        return;
+      }
+
+      // Validate Ethereum address
+      try {
+        validateEthereumAddress(address);
+      } catch (e: any) {
+        res.status(400).json({ error: e.message || 'Invalid Ethereum address' });
+        return;
+      }
+
+      const sanitizedNickname = nickname ? sanitizeNickname(nickname) : null;
+      const result = await addCustomAccount(address, sanitizedNickname);
+
+      if (!result.success) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+
+      logger.info('custom_account_added', { address: result.account?.address });
+
+      // Immediately fetch stats for the new custom account so it doesn't show all zeros
+      // We await this so stats are available when UI reloads
+      let stats = null;
+      if (leaderboardService && result.account?.address) {
+        try {
+          stats = await leaderboardService.fetchAndStoreCustomAccountStats(result.account.address, sanitizedNickname);
+        } catch (err: any) {
+          logger.error('custom_account_stats_fetch_failed', { address: result.account?.address, err: err?.message });
+        }
+      }
+
+      res.status(201).json({ success: true, account: result.account, stats });
+    } catch (err: any) {
+      logger.error('custom_account_add_failed', { err: err?.message });
+      res.status(500).json({ error: 'Failed to add custom account' });
+    }
+  });
+
+  // Remove a custom account
+  app.delete('/custom-accounts/:address', async (req, res) => {
+    try {
+      const { address } = req.params;
+      if (!address) {
+        res.status(400).json({ error: 'Address is required' });
+        return;
+      }
+
+      const removed = await removeCustomAccount(address);
+      if (!removed) {
+        res.status(404).json({ error: 'Account not found' });
+        return;
+      }
+
+      logger.info('custom_account_removed', { address });
+      res.json({ success: true });
+    } catch (err: any) {
+      logger.error('custom_account_remove_failed', { err: err?.message });
+      res.status(500).json({ error: 'Failed to remove custom account' });
+    }
+  });
+
+  // =====================
+  // Manual Refresh API
+  // =====================
+
+  // Trigger a manual refresh of the leaderboard
+  app.post('/leaderboard/refresh', ownerOnly, async (req, res) => {
+    try {
+      const period = Number(req.query.period ?? DEFAULT_LEADERBOARD_PERIOD);
+      if (!leaderboardService) {
+        res.status(503).json({ error: 'Leaderboard service not initialized' });
+        return;
+      }
+
+      logger.info('manual_refresh_triggered', { period });
+
+      // Run refresh in background, return immediately
+      leaderboardService.refreshPeriod(period).catch((err) => {
+        logger.error('manual_refresh_failed', { period, err: err?.message });
+      });
+
+      res.json({ success: true, message: 'Refresh started', period });
+    } catch (err: any) {
+      logger.error('manual_refresh_request_failed', { err: err?.message });
+      res.status(500).json({ error: 'Failed to trigger refresh' });
+    }
+  });
+
+  // Get last refresh timestamp
+  app.get('/leaderboard/refresh-status', async (req, res) => {
+    try {
+      const period = Number(req.query.period ?? DEFAULT_LEADERBOARD_PERIOD);
+      const lastRefresh = await getLastRefreshTime(period);
+      res.json({
+        period,
+        lastRefresh,
+        lastRefreshFormatted: lastRefresh ? new Date(lastRefresh).toISOString() : null
+      });
+    } catch (err: any) {
+      logger.error('refresh_status_failed', { err: err?.message });
+      res.status(500).json({ error: 'Failed to get refresh status' });
     }
   });
 

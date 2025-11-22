@@ -1,4 +1,7 @@
 jest.mock('@hl/ts-lib', () => {
+  // Import actual scoring functions (don't mock them)
+  const actualScoring = jest.requireActual('@hl/ts-lib/scoring');
+
   return {
     createLogger: () => ({
       info: jest.fn(),
@@ -11,6 +14,9 @@ jest.mock('@hl/ts-lib', () => {
     normalizeAddress: (value: string) => value.toLowerCase(),
     nowIso: () => '2024-01-01T00:00:00.000Z',
     CandidateEventSchema: { parse: (input: any) => input },
+    // Include scoring functions from actual module
+    computePerformanceScore: actualScoring.computePerformanceScore,
+    DEFAULT_SCORING_PARAMS: actualScoring.DEFAULT_SCORING_PARAMS,
   };
 });
 

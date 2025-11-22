@@ -110,6 +110,223 @@ main {
   color: #f8fafc;
 }
 
+/* Card header with actions */
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.card-header h3 {
+  margin: 0;
+}
+
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.last-refresh {
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+
+.refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.refresh-btn:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.25);
+  color: #c7d2fe;
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+.refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.refresh-btn.loading .refresh-icon {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.refresh-icon {
+  flex-shrink: 0;
+}
+
+/* Custom accounts section */
+.custom-accounts-section {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: rgba(148, 163, 184, 0.05);
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.custom-accounts-header {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 10px;
+}
+
+.custom-accounts-form {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.custom-accounts-form input {
+  flex: 1;
+  min-width: 150px;
+  padding: 8px 12px;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 6px;
+  color: #f8fafc;
+  font-size: 0.875rem;
+  font-family: inherit;
+  transition: all 0.2s ease;
+}
+
+.custom-accounts-form input:focus {
+  outline: none;
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.1);
+}
+
+.custom-accounts-form input::placeholder {
+  color: #64748b;
+}
+
+#custom-address-input {
+  flex: 2;
+  min-width: 200px;
+  font-family: 'Monaco', 'Consolas', monospace;
+  font-size: 0.8rem;
+}
+
+#custom-nickname-input {
+  flex: 1;
+  min-width: 120px;
+}
+
+.add-custom-btn {
+  padding: 8px 16px;
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.add-custom-btn:hover:not(:disabled) {
+  background: rgba(34, 197, 94, 0.25);
+  border-color: rgba(34, 197, 94, 0.5);
+}
+
+.add-custom-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.custom-accounts-error {
+  font-size: 0.75rem;
+  color: #f87171;
+  margin-top: 8px;
+  display: none;
+}
+
+.custom-accounts-error.show {
+  display: block;
+}
+
+/* Custom account badge */
+.custom-badge {
+  color: #fbbf24;
+  font-size: 0.875rem;
+  margin-left: 4px;
+}
+
+.custom-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.custom-star {
+  color: #fbbf24;
+  font-size: 0.875rem;
+  line-height: 1;
+}
+
+.remove-custom-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0;
+  background: rgba(248, 113, 113, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  border-radius: 50%;
+  font-size: 0.7rem;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  line-height: 1;
+}
+
+.remove-custom-btn:hover {
+  background: rgba(248, 113, 113, 0.3);
+  border-color: rgba(248, 113, 113, 0.5);
+}
+
+/* Score column */
+.score-cell {
+  font-weight: 600;
+  font-family: 'Monaco', 'Consolas', monospace;
+  font-size: 0.8rem;
+}
+
+/* Custom account row highlighting */
+.custom-row {
+  background: rgba(251, 191, 36, 0.05);
+}
+
+.custom-row:hover {
+  background: rgba(251, 191, 36, 0.1);
+}
+
 .grid-2 {
   display: grid;
   grid-template-columns: 1fr;
@@ -170,6 +387,7 @@ th, td {
   padding: 12px 10px;
   text-align: left;
   border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  vertical-align: middle;
 }
 
 th {
@@ -360,10 +578,14 @@ td {
 
 .holds-cell {
   font-weight: 600;
+  vertical-align: middle;
+}
+
+.holds-cell .holding-chip,
+.holds-cell .placeholder {
   display: inline-flex;
-  gap: 6px;
   align-items: center;
-  flex-wrap: wrap;
+  vertical-align: middle;
 }
 
 .holding-chip {
@@ -409,6 +631,47 @@ td {
 
   .card h3 {
     font-size: 1rem;
+  }
+
+  .card-header {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .card-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .last-refresh {
+    font-size: 0.7rem;
+  }
+
+  .refresh-btn {
+    font-size: 0.7rem;
+    padding: 5px 10px;
+  }
+
+  .custom-accounts-section {
+    padding: 10px;
+  }
+
+  .custom-accounts-form {
+    flex-direction: column;
+  }
+
+  .custom-accounts-form input {
+    min-width: 100%;
+  }
+
+  #custom-address-input,
+  #custom-nickname-input {
+    flex: none;
+    width: 100%;
+  }
+
+  .add-custom-btn {
+    width: 100%;
   }
 
   .toggle-group button {
@@ -478,8 +741,7 @@ td {
   }
 
   .holds-cell {
-    flex-direction: column;
-    align-items: flex-start;
+    /* No special mobile styles needed - uses standard table cell alignment */
   }
 
   .metric-hint {

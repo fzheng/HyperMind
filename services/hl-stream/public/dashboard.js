@@ -5,12 +5,22 @@ const decisionsList = document.getElementById('decisions-list');
 const recommendationCard = document.getElementById('recommendation-card');
 const symbolButtons = document.querySelectorAll('.toggle-group button');
 const periodButtons = document.querySelectorAll('.period-toggle button');
+const lastRefreshEl = document.getElementById('last-refresh');
+const refreshBtn = document.getElementById('refresh-btn');
+const customCountEl = document.getElementById('custom-count');
+const customAddressInput = document.getElementById('custom-address-input');
+const customNicknameInput = document.getElementById('custom-nickname-input');
+const addCustomBtn = document.getElementById('add-custom-btn');
+const customErrorEl = document.getElementById('custom-accounts-error');
 
 const API_BASE = '/dashboard/api';
-const TOP_TABLE_LIMIT = 12;
+const SCOUT_API = '/api'; // hl-scout API base (proxied via hl-stream)
+const TOP_TABLE_LIMIT = 13; // 10 system + up to 3 custom
 let fillsCache = [];
 let dashboardPeriod = 30;
 let addressMeta = {};
+let customAccountCount = 0;
+const MAX_CUSTOM_ACCOUNTS = 3;
 
 function placeholder(text = 'No live data') {
   return `<span class="placeholder">${text}</span>`;
@@ -96,10 +106,19 @@ async function fetchJson(url) {
   return res.json();
 }
 
+function fmtScore(score) {
+  if (!Number.isFinite(score)) return '—';
+  if (score === 0) return '0';
+  // Display score with appropriate precision
+  if (Math.abs(score) >= 100) return score.toFixed(1);
+  if (Math.abs(score) >= 1) return score.toFixed(2);
+  return score.toFixed(4);
+}
+
 function renderAddresses(stats = [], profiles = {}, holdings = {}) {
   const rows = (stats || []).slice(0, TOP_TABLE_LIMIT);
   if (!rows.length) {
-    addressTable.innerHTML = `<tr><td colspan="6">${placeholder('No live leaderboard data')}</td></tr>`;
+    addressTable.innerHTML = `<tr><td colspan="7">${placeholder('No live leaderboard data')}</td></tr>`;
     return;
   }
   addressTable.innerHTML = rows
@@ -117,12 +136,20 @@ function renderAddresses(stats = [], profiles = {}, holdings = {}) {
       const holdingKey = row.address?.toLowerCase() || '';
       const holdingCell = holdings[holdingKey] ? formatHolding(holdings[holdingKey]) : placeholder('No live position');
       const pnlCell = typeof row.realizedPnl === 'number' ? fmtUsdShort(row.realizedPnl) : placeholder();
+      const scoreCell = typeof row.score === 'number' ? fmtScore(row.score) : placeholder();
+      const isCustom = row.isCustom === true;
+      const customIndicator = isCustom ? '<span class="custom-star" title="Custom tracked account">★</span>' : '';
+      const removeBtn = isCustom ? `<button class="remove-custom-btn" data-address="${row.address}" title="Remove custom account">×</button>` : '';
       return `
-        <tr>
+        <tr class="${isCustom ? 'custom-row' : ''}">
           <td data-label="Address" title="Hyperliquid tx count: ${txCount}">
-            <a href="https://hyperbot.network/trader/${row.address}" target="_blank" rel="noopener noreferrer">
-              ${shortAddress(row.address)}
-            </a>
+            <span class="custom-indicator">
+              ${customIndicator}
+              <a href="https://hyperbot.network/trader/${row.address}" target="_blank" rel="noopener noreferrer">
+                ${shortAddress(row.address)}
+              </a>
+              ${removeBtn}
+            </span>
             ${row.remark ? `<div class="addr-remark">${row.remark}</div>` : ''}
           </td>
           <td data-label="Win Rate">${winRateCell}</td>
@@ -132,10 +159,20 @@ function renderAddresses(stats = [], profiles = {}, holdings = {}) {
             ${holdingCell}
           </td>
           <td data-label="Realized PnL">${pnlCell}</td>
+          <td data-label="Score" class="score-cell">${scoreCell}</td>
         </tr>
       `;
     })
     .join('');
+
+  // Attach event listeners for remove buttons
+  document.querySelectorAll('.remove-custom-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const address = btn.dataset.address;
+      if (address) removeCustomAccount(address);
+    });
+  });
 }
 
 function renderRecommendation(summary) {
@@ -206,6 +243,22 @@ function renderDecisions(list) {
     .join('');
 }
 
+function updateLastRefreshDisplay(lastRefresh) {
+  if (lastRefresh) {
+    const date = new Date(lastRefresh);
+    lastRefreshEl.textContent = `Last updated: ${date.toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`;
+  } else {
+    lastRefreshEl.textContent = 'Last updated: —';
+  }
+}
+
+function updateCustomAccountCount(count, max) {
+  customAccountCount = count;
+  customCountEl.textContent = count;
+  // Disable add button if at max
+  addCustomBtn.disabled = count >= max;
+}
+
 async function refreshSummary() {
   try {
     const summaryUrl = `${API_BASE}/summary?period=${dashboardPeriod}&limit=${TOP_TABLE_LIMIT}`;
@@ -224,6 +277,14 @@ async function refreshSummary() {
     renderAddresses(rows, data.profiles || {}, holdings);
     renderRecommendation(data);
     statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+
+    // Update last refresh display
+    updateLastRefreshDisplay(data.lastRefresh);
+
+    // Update custom account count
+    if (typeof data.customAccountCount === 'number') {
+      updateCustomAccountCount(data.customAccountCount, data.maxCustomAccounts || MAX_CUSTOM_ACCOUNTS);
+    }
   } catch (err) {
     statusEl.textContent = 'Failed to load summary';
     console.error(err);
@@ -336,9 +397,179 @@ function initPeriodControls() {
   });
 }
 
+// Show error message in custom accounts section
+function showCustomError(message) {
+  customErrorEl.textContent = message;
+  customErrorEl.classList.add('show');
+  setTimeout(() => {
+    customErrorEl.classList.remove('show');
+  }, 5000);
+}
+
+// Clear error message
+function clearCustomError() {
+  customErrorEl.classList.remove('show');
+  customErrorEl.textContent = '';
+}
+
+// Validate Ethereum address format
+function isValidEthAddress(address) {
+  return /^0x[a-fA-F0-9]{40}$/.test(address);
+}
+
+// Add a custom account
+async function addCustomAccount() {
+  clearCustomError();
+  const address = customAddressInput.value.trim();
+  const nickname = customNicknameInput.value.trim();
+
+  if (!address) {
+    showCustomError('Please enter an Ethereum address');
+    return;
+  }
+
+  if (!isValidEthAddress(address)) {
+    showCustomError('Invalid Ethereum address format (must be 0x + 40 hex characters)');
+    return;
+  }
+
+  if (customAccountCount >= MAX_CUSTOM_ACCOUNTS) {
+    showCustomError(`Maximum of ${MAX_CUSTOM_ACCOUNTS} custom accounts allowed`);
+    return;
+  }
+
+  addCustomBtn.disabled = true;
+  addCustomBtn.textContent = 'Adding...';
+
+  try {
+    const res = await fetch(`${API_BASE}/custom-accounts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address, nickname: nickname || undefined })
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      showCustomError(data.error || 'Failed to add custom account');
+      return;
+    }
+
+    // Clear inputs on success
+    customAddressInput.value = '';
+    customNicknameInput.value = '';
+
+    // Refresh the summary to show the new account
+    await refreshSummary();
+  } catch (err) {
+    console.error('Add custom account error:', err);
+    showCustomError('Failed to add custom account');
+  } finally {
+    addCustomBtn.disabled = customAccountCount >= MAX_CUSTOM_ACCOUNTS;
+    addCustomBtn.textContent = 'Add';
+  }
+}
+
+// Remove a custom account
+async function removeCustomAccount(address) {
+  if (!address) return;
+
+  try {
+    const res = await fetch(`${API_BASE}/custom-accounts/${encodeURIComponent(address)}`, {
+      method: 'DELETE'
+    });
+
+    if (!res.ok) {
+      const data = await res.json();
+      console.error('Remove custom account error:', data.error);
+      return;
+    }
+
+    // Refresh the summary to update the table
+    await refreshSummary();
+  } catch (err) {
+    console.error('Remove custom account error:', err);
+  }
+}
+
+// Trigger manual leaderboard refresh
+async function triggerLeaderboardRefresh() {
+  refreshBtn.disabled = true;
+  refreshBtn.classList.add('loading');
+
+  try {
+    const res = await fetch(`${API_BASE}/leaderboard/refresh`, {
+      method: 'POST'
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      console.error('Refresh error:', data.error);
+      statusEl.textContent = 'Refresh failed';
+      return;
+    }
+
+    // Poll for refresh completion
+    statusEl.textContent = 'Refreshing leaderboard...';
+    pollRefreshStatus();
+  } catch (err) {
+    console.error('Refresh error:', err);
+    statusEl.textContent = 'Refresh failed';
+    refreshBtn.disabled = false;
+    refreshBtn.classList.remove('loading');
+  }
+}
+
+// Poll refresh status until complete
+async function pollRefreshStatus() {
+  try {
+    const data = await fetchJson(`${API_BASE}/leaderboard/refresh-status`);
+
+    if (data.status === 'refreshing') {
+      setTimeout(pollRefreshStatus, 2000);
+      return;
+    }
+
+    // Refresh complete
+    refreshBtn.disabled = false;
+    refreshBtn.classList.remove('loading');
+
+    if (data.status === 'idle') {
+      statusEl.textContent = 'Refresh complete';
+      await refreshSummary();
+    }
+  } catch (err) {
+    console.error('Poll refresh status error:', err);
+    refreshBtn.disabled = false;
+    refreshBtn.classList.remove('loading');
+    statusEl.textContent = 'Refresh status unknown';
+  }
+}
+
+// Initialize custom accounts controls
+function initCustomAccountsControls() {
+  addCustomBtn.addEventListener('click', addCustomAccount);
+
+  // Allow Enter key to submit
+  customAddressInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') addCustomAccount();
+  });
+  customNicknameInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') addCustomAccount();
+  });
+}
+
+// Initialize refresh button
+function initRefreshButton() {
+  refreshBtn.addEventListener('click', triggerLeaderboardRefresh);
+}
+
 function init() {
   initChartControls();
   initPeriodControls();
+  initCustomAccountsControls();
+  initRefreshButton();
   renderChart('BTCUSDT');
   refreshSummary();
   refreshFills();

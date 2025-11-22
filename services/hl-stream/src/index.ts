@@ -84,6 +84,9 @@ function ownerOnly(req: Request, res: Response, next: NextFunction) {
 }
 
 async function fetchWatchlist(): Promise<string[]> {
+  const addresses: string[] = [];
+
+  // Fetch top-ranked system accounts from leaderboard
   const selectedUrl = new URL('/leaderboard/selected', scoutUrl);
   selectedUrl.searchParams.set('period', String(WATCH_PERIOD));
   selectedUrl.searchParams.set('limit', String(WATCH_LIMIT));
@@ -92,12 +95,38 @@ async function fetchWatchlist(): Promise<string[]> {
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data?.entries) && data.entries.length) {
-        return data.entries.map((entry: any) => normalizeAddress(entry.address));
+        addresses.push(...data.entries.map((entry: any) => normalizeAddress(entry.address)));
       }
     }
   } catch (err) {
     logger.warn('selected_watchlist_failed', { err: err instanceof Error ? err.message : err });
   }
+
+  // Also fetch custom accounts and add them to the watchlist
+  try {
+    const customRes = await fetch(`${scoutUrl}/custom-accounts`, {
+      headers: { 'x-owner-key': OWNER_TOKEN }
+    });
+    if (customRes.ok) {
+      const customData = await customRes.json();
+      if (Array.isArray(customData?.accounts) && customData.accounts.length) {
+        const customAddresses = customData.accounts.map((acc: any) => normalizeAddress(acc.address));
+        // Add custom addresses that aren't already in the list
+        for (const addr of customAddresses) {
+          if (!addresses.includes(addr)) {
+            addresses.push(addr);
+          }
+        }
+        logger.info('custom_accounts_added_to_watchlist', { count: customAddresses.length });
+      }
+    }
+  } catch (err) {
+    logger.warn('custom_accounts_watchlist_failed', { err: err instanceof Error ? err.message : err });
+  }
+
+  if (addresses.length) return addresses;
+
+  // Fallback to addresses endpoint
   try {
     const fallback = await fetch(`${scoutUrl}/addresses`, {
       headers: { 'x-owner-key': OWNER_TOKEN }
@@ -278,6 +307,61 @@ async function main() {
   app.get('/dashboard/api/fills', (req, res) => proxyScout('/dashboard/fills', req, res));
   app.get('/dashboard/api/decisions', (req, res) => proxyScout('/dashboard/decisions', req, res));
   app.get('/dashboard/api/price', (req, res) => proxyScout('/dashboard/price', req, res));
+
+  // Custom accounts proxy routes
+  app.get('/dashboard/api/custom-accounts', (req, res) => proxyScout('/custom-accounts', req, res));
+  app.post('/dashboard/api/custom-accounts', async (req, res) => {
+    try {
+      const target = new URL('/custom-accounts', scoutUrl);
+      const response = await fetch(target, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-owner-key': OWNER_TOKEN
+        },
+        body: JSON.stringify(req.body)
+      });
+      const body = await response.text();
+      const type = response.headers.get('content-type') || 'application/json';
+      res.status(response.status).setHeader('Content-Type', type).send(body);
+    } catch (err: any) {
+      logger.error('custom_accounts_proxy_failed', { err: err?.message });
+      res.status(502).json({ error: 'proxy_failed' });
+    }
+  });
+  app.delete('/dashboard/api/custom-accounts/:address', async (req, res) => {
+    try {
+      const target = new URL(`/custom-accounts/${encodeURIComponent(req.params.address)}`, scoutUrl);
+      const response = await fetch(target, {
+        method: 'DELETE',
+        headers: { 'x-owner-key': OWNER_TOKEN }
+      });
+      const body = await response.text();
+      const type = response.headers.get('content-type') || 'application/json';
+      res.status(response.status).setHeader('Content-Type', type).send(body);
+    } catch (err: any) {
+      logger.error('custom_accounts_delete_proxy_failed', { err: err?.message });
+      res.status(502).json({ error: 'proxy_failed' });
+    }
+  });
+
+  // Leaderboard refresh proxy routes
+  app.post('/dashboard/api/leaderboard/refresh', async (_req, res) => {
+    try {
+      const target = new URL('/leaderboard/refresh', scoutUrl);
+      const response = await fetch(target, {
+        method: 'POST',
+        headers: { 'x-owner-key': OWNER_TOKEN }
+      });
+      const body = await response.text();
+      const type = response.headers.get('content-type') || 'application/json';
+      res.status(response.status).setHeader('Content-Type', type).send(body);
+    } catch (err: any) {
+      logger.error('leaderboard_refresh_proxy_failed', { err: err?.message });
+      res.status(502).json({ error: 'proxy_failed' });
+    }
+  });
+  app.get('/dashboard/api/leaderboard/refresh-status', (req, res) => proxyScout('/leaderboard/refresh-status', req, res));
 
   const server = http.createServer(app);
   configureWebSocket(server);

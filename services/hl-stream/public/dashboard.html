@@ -34,8 +34,33 @@
 
       <section class="grid-2">
         <div class="card">
-          <h3>Top Performance</h3>
-          <span class="metric-hint">Live leaderboard data from Hyperbot &amp; Hyperliquid. Cells labeled "No live data" indicate the upstream API did not return a value.</span>
+          <div class="card-header">
+            <h3>Top Performance</h3>
+            <div class="card-actions">
+              <span id="last-refresh" class="last-refresh">Last updated: —</span>
+              <button id="refresh-btn" class="refresh-btn" title="Refresh leaderboard">
+                <svg class="refresh-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                </svg>
+                <span>Refresh</span>
+              </button>
+            </div>
+          </div>
+          <span class="metric-hint">Live leaderboard data from Hyperbot &amp; Hyperliquid. Ranked by composite performance score. <span class="custom-badge">★</span> indicates custom-tracked accounts.</span>
+
+          <!-- Custom Accounts Section -->
+          <div class="custom-accounts-section">
+            <div class="custom-accounts-header">
+              <span>Custom Accounts (<span id="custom-count">0</span>/3)</span>
+            </div>
+            <div class="custom-accounts-form">
+              <input type="text" id="custom-address-input" placeholder="Enter Ethereum address (0x...)" maxlength="42" />
+              <input type="text" id="custom-nickname-input" placeholder="Nickname (optional)" maxlength="32" />
+              <button id="add-custom-btn" class="add-custom-btn" title="Add custom account">Add</button>
+            </div>
+            <div id="custom-accounts-error" class="custom-accounts-error"></div>
+          </div>
+
           <div class="table-wrapper">
             <table class="stats-table">
               <thead>
@@ -46,6 +71,7 @@
                   <th>Trades</th>
                   <th>Holdings</th>
                   <th>Realized PnL</th>
+                  <th>Score</th>
                 </tr>
               </thead>
               <tbody id="address-table"></tbody>

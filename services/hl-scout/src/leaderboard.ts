@@ -1,4 +1,13 @@
-import { createLogger, getPool, normalizeAddress, nowIso, CandidateEventSchema } from '@hl/ts-lib';
+import {
+  createLogger,
+  getPool,
+  normalizeAddress,
+  nowIso,
+  CandidateEventSchema,
+  computePerformanceScore,
+  DEFAULT_SCORING_PARAMS,
+  type ScoringParams
+} from '@hl/ts-lib';
 import type { CandidateEvent } from '@hl/ts-lib';
 
 const DEFAULT_API_URL = 'https://hyperbot.network/api/leaderboard/smart';
@@ -15,6 +24,12 @@ type LeaderboardRawEntry = {
   remark?: string | null;
   labels?: string[] | null;
   pnlList?: Array<{ timestamp: number; value: string }>;
+  // Additional fields for new scoring formula
+  accountValue?: number;
+  startingEquity?: number;
+  maxDrawdown?: number;
+  numWins?: number;
+  numLosses?: number;
 };
 
 export type RankedEntry = {
@@ -141,7 +156,31 @@ export class LeaderboardService {
     return results.slice(0, this.opts.topN);
   }
 
+  /**
+   * Scores entries using the new performance scoring formula.
+   *
+   * Formula:
+   * 1. r = realizedPnl / startingEquity (normalized return)
+   * 2. baseWinRate = (numWins + 1) / (numWins + numLosses + 2) (Laplace smoothing)
+   * 3. adjWinRate = 0.8 * baseWinRate if numLosses == 0, else baseWinRate
+   * 4. reliability = numTrades / (numTrades + N0)
+   * 5. freqPenalty = N1 / (numTrades + N1)
+   * 6. denominator = EPS + maxDrawdown
+   * 7. score = (r * adjWinRate * reliability * freqPenalty) / denominator
+   */
   private scoreEntries(entries: LeaderboardRawEntry[]): RankedEntry[] {
+    // Access DEFAULT_SCORING_PARAMS values with fallback defaults to handle test environments
+    const defaultN0 = DEFAULT_SCORING_PARAMS?.N0 ?? 30;
+    const defaultN1 = DEFAULT_SCORING_PARAMS?.N1 ?? 300;
+    const defaultEPS = DEFAULT_SCORING_PARAMS?.EPS ?? 0.01;
+
+    const scoringParams: ScoringParams = {
+      // Can be overridden via environment variables if needed
+      N0: Number(process.env.SCORING_N0 ?? defaultN0),
+      N1: Number(process.env.SCORING_N1 ?? defaultN1),
+      EPS: Number(process.env.SCORING_EPS ?? defaultEPS),
+    };
+
     const base = entries
       .map((entry) => {
         const address = normalizeAddress(entry.address);
@@ -150,13 +189,32 @@ export class LeaderboardService {
         const pnl = Number(entry.realizedPnl ?? 0);
         const efficiency = executed > 0 ? pnl / executed : pnl;
         const pnlConsistency = computeConsistency(entry.pnlList || []);
-        const winScore = Math.pow(Math.min(winRate, 0.98), 0.8);
-        const effScore = normalizeLog(Math.abs(efficiency), 1e3, 1e8);
-        const pnlScore = normalizeLog(Math.abs(pnl), 1e5, 1e10);
-        const score = 0.35 * winScore + 0.3 * pnlConsistency + 0.2 * effScore + 0.15 * pnlScore;
+
+        // Extract starting equity from meta if available, otherwise estimate from PnL
+        // Use accountValue or estimate based on typical leverage ratios
+        const startingEquity = Number(entry.accountValue ?? entry.startingEquity ?? Math.max(Math.abs(pnl) * 10, 10000));
+
+        // Estimate wins/losses from win rate and trade count
+        const numTrades = executed;
+        const numWins = Math.round(numTrades * winRate);
+        const numLosses = numTrades - numWins;
+
+        // Get max drawdown (default to small value if not available)
+        const maxDrawdown = Math.abs(Number(entry.maxDrawdown ?? 0.01));
+
+        // Compute score using the new formula
+        const scoringResult = computePerformanceScore({
+          realizedPnl: pnl,
+          startingEquity,
+          numTrades,
+          numWins,
+          numLosses,
+          maxDrawdown,
+        }, scoringParams);
+
         return {
           address,
-          score,
+          score: scoringResult.score,
           winRate,
           executedOrders: executed,
           realizedPnl: pnl,
@@ -168,19 +226,31 @@ export class LeaderboardService {
           statClosedPositions: null,
           statAvgPosDuration: null,
           statTotalPnl: null,
-          statMaxDrawdown: null,
-          meta: entry,
+          statMaxDrawdown: maxDrawdown,
+          meta: {
+            ...entry,
+            scoringDetails: scoringResult.details,
+            startingEquity,
+            numWins,
+            numLosses,
+          },
         };
       })
       .filter((entry) => Number.isFinite(entry.score));
-    let scored = base.filter((entry) => entry.winRate < 0.999);
+
+    // Filter out suspicious 100% win rates with many trades
+    let scored = base.filter((entry) => entry.winRate < 0.999 || entry.executedOrders < 10);
     if (!scored.length) scored = base;
+
+    // Sort by score descending
     scored.sort((a, b) => b.score - a.score);
-    const totalScore = scored.slice(0, this.opts.selectCount).reduce((sum, e) => sum + e.score, 0) || 1;
+
+    // Normalize weights for top selectCount entries
+    const totalScore = scored.slice(0, this.opts.selectCount).reduce((sum, e) => sum + Math.max(e.score, 0), 0) || 1;
     return scored.map((entry, idx) => ({
       ...entry,
       rank: idx + 1,
-      weight: idx < this.opts.selectCount ? entry.score / totalScore : 0,
+      weight: idx < this.opts.selectCount ? Math.max(entry.score, 0) / totalScore : 0,
     }));
   }
 
@@ -647,6 +717,95 @@ export class LeaderboardService {
       }
     }
   }
+
+  /**
+   * Fetch stats for a custom account and upsert into hl_leaderboard_entries.
+   * This is called when a user adds a custom account so stats appear immediately.
+   */
+  async fetchAndStoreCustomAccountStats(address: string, nickname?: string | null): Promise<RankedEntry | null> {
+    const normalized = normalizeAddress(address);
+    const period = this.opts.periods[0] ?? 30; // Use first configured period (default 30d)
+
+    this.logger.info('fetch_custom_account_stats', { address: normalized, period });
+
+    // Fetch stats from Hyperbot API
+    const stats = await this.fetchAddressStat(normalized, period);
+
+    // Build a minimal RankedEntry with fetched stats
+    const entry: RankedEntry = {
+      address: normalized,
+      rank: 9999, // Custom accounts get a high rank (sorted separately in UI)
+      score: 0,
+      weight: 0, // Custom accounts don't contribute to weighted selection
+      winRate: stats?.winRate ?? 0,
+      executedOrders: (stats?.openPosCount ?? 0) + (stats?.closePosCount ?? 0),
+      realizedPnl: stats?.totalPnl ?? 0,
+      efficiency: stats?.totalPnl && stats.closePosCount ? stats.totalPnl / Math.max(1, stats.closePosCount) : 0,
+      pnlConsistency: 0,
+      remark: nickname ?? null,
+      labels: ['custom'],
+      statOpenPositions: stats?.openPosCount ?? null,
+      statClosedPositions: stats?.closePosCount ?? null,
+      statAvgPosDuration: stats?.avgPosDuration ?? null,
+      statTotalPnl: stats?.totalPnl ?? null,
+      statMaxDrawdown: stats?.maxDrawdown ?? null,
+      meta: { custom: true, fetchedAt: nowIso() },
+    };
+
+    // Upsert into hl_leaderboard_entries
+    const pool = await getPool();
+    try {
+      await pool.query(
+        `
+        INSERT INTO hl_leaderboard_entries (
+          period_days, address, rank, score, weight, win_rate, executed_orders,
+          realized_pnl, pnl_consistency, efficiency, remark, labels, metrics,
+          stat_open_positions, stat_closed_positions, stat_avg_pos_duration, stat_total_pnl, stat_max_drawdown
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        ON CONFLICT (period_days, lower(address)) DO UPDATE SET
+          win_rate = EXCLUDED.win_rate,
+          executed_orders = EXCLUDED.executed_orders,
+          realized_pnl = EXCLUDED.realized_pnl,
+          efficiency = EXCLUDED.efficiency,
+          remark = COALESCE(EXCLUDED.remark, hl_leaderboard_entries.remark),
+          labels = EXCLUDED.labels,
+          metrics = EXCLUDED.metrics,
+          stat_open_positions = EXCLUDED.stat_open_positions,
+          stat_closed_positions = EXCLUDED.stat_closed_positions,
+          stat_avg_pos_duration = EXCLUDED.stat_avg_pos_duration,
+          stat_total_pnl = EXCLUDED.stat_total_pnl,
+          stat_max_drawdown = EXCLUDED.stat_max_drawdown,
+          fetched_at = now()
+        `,
+        [
+          period,
+          normalized,
+          entry.rank,
+          entry.score,
+          entry.weight,
+          entry.winRate,
+          entry.executedOrders,
+          entry.realizedPnl,
+          entry.pnlConsistency,
+          entry.efficiency,
+          entry.remark,
+          JSON.stringify(entry.labels),
+          JSON.stringify(entry.meta),
+          entry.statOpenPositions,
+          entry.statClosedPositions,
+          entry.statAvgPosDuration,
+          entry.statTotalPnl,
+          entry.statMaxDrawdown,
+        ]
+      );
+      this.logger.info('custom_account_stats_stored', { address: normalized, period, stats });
+      return entry;
+    } catch (err: any) {
+      this.logger.error('custom_account_stats_store_failed', { address: normalized, err: err?.message });
+      return null;
+    }
+  }
 }
 
 export default LeaderboardService;
@@ -717,13 +876,7 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function normalizeLog(value: number, minRef: number, maxRef: number): number {
-  if (value <= 0) return 0;
-  const logValue = Math.log10(value);
-  const minLog = Math.log10(minRef);
-  const maxLog = Math.log10(maxRef);
-  return clamp((logValue - minLog) / (maxLog - minLog), 0, 1);
-}
+// normalizeLog removed - no longer used with new scoring formula
 
 function computeConsistency(list: Array<{ timestamp: number; value: string }>): number {
   if (!list?.length) return 0.5;
