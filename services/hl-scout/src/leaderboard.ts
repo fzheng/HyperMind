@@ -16,6 +16,31 @@ const WINDOW_PERIOD_MAP: Record<string, number> = { day: 1, week: 7, month: 30 }
 const DEFAULT_STATS_CONCURRENCY = Number(process.env.LEADERBOARD_STATS_CONCURRENCY ?? 4);
 const DEFAULT_SERIES_CONCURRENCY = Number(process.env.LEADERBOARD_SERIES_CONCURRENCY ?? 2);
 
+/**
+ * Hyperbot leaderboard sort options
+ * Used in API query parameter: ?sort=<value>
+ */
+export enum LeaderboardSort {
+  /** Sort by win rate (all accounts in hyperliquid) */
+  WIN_RATE = 0,
+  /** Sort by account total value */
+  ACCOUNT_VALUE = 1,
+  /** Sort by realized PnL */
+  PNL = 3,
+  /** Sort by total trades count */
+  TRADES_COUNT = 4,
+  /** Sort by profitable trades count */
+  PROFITABLE_TRADES = 5,
+  /** Sort by last operation time */
+  LAST_OPERATION = 6,
+  /** Sort by average holding period */
+  AVG_HOLDING_PERIOD = 7,
+  /** Sort by current positions */
+  CURRENT_POSITIONS = 8,
+}
+
+const DEFAULT_LEADERBOARD_SORT = LeaderboardSort.PNL;
+
 type LeaderboardRawEntry = {
   address: string;
   winRate?: number;
@@ -75,6 +100,8 @@ export interface LeaderboardOptions {
   pageSize?: number;
   refreshMs?: number;
   enrichCount?: number;
+  /** Sort order for leaderboard API (default: PNL) */
+  sort?: LeaderboardSort;
 }
 
 export class LeaderboardService {
@@ -96,6 +123,7 @@ export class LeaderboardService {
       pageSize: opts.pageSize ?? 100,
       refreshMs: opts.refreshMs ?? 24 * 60 * 60 * 1000,
       enrichCount: opts.enrichCount ?? opts.selectCount ?? 12,
+      sort: opts.sort ?? DEFAULT_LEADERBOARD_SORT,
     };
     this.publishCandidate = publishCandidate;
     this.smartApiBase = this.opts.apiUrl.endsWith('/') ? this.opts.apiUrl : `${this.opts.apiUrl}/`;
@@ -145,7 +173,7 @@ export class LeaderboardService {
     const results: LeaderboardRawEntry[] = [];
     const pagesNeeded = Math.ceil(this.opts.topN / this.opts.pageSize);
     for (let page = 1; page <= pagesNeeded; page += 1) {
-      const url = `${this.opts.apiUrl}?pageNum=${page}&pageSize=${this.opts.pageSize}&period=${period}&sort=3`;
+      const url = `${this.opts.apiUrl}?pageNum=${page}&pageSize=${this.opts.pageSize}&period=${period}&sort=${this.opts.sort}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`leaderboard HTTP ${res.status}`);
       const payload = await res.json();
@@ -157,28 +185,24 @@ export class LeaderboardService {
   }
 
   /**
-   * Scores entries using the new performance scoring formula.
+   * Scores entries using the new composite performance scoring formula.
    *
-   * Formula:
-   * 1. r = realizedPnl / startingEquity (normalized return)
-   * 2. baseWinRate = (numWins + 1) / (numWins + numLosses + 2) (Laplace smoothing)
-   * 3. adjWinRate = 0.8 * baseWinRate if numLosses == 0, else baseWinRate
-   * 4. reliability = numTrades / (numTrades + N0)
-   * 5. freqPenalty = N1 / (numTrades + N1)
-   * 6. denominator = EPS + maxDrawdown
-   * 7. score = (r * adjWinRate * reliability * freqPenalty) / denominator
+   * Formula components (weighted sum):
+   * 1. Smooth PnL Score (45%) - performance over time (monotonicity, drawdowns)
+   * 2. Adjusted Win Rate (30%) - with Laplace smoothing, penalize 100% win rates
+   * 3. Normalized PnL (15%) - log-scaled realized PnL (modest weight for whales)
+   * 4. Trade Frequency (10%) - prefer moderate activity, not too many trades
    */
   private scoreEntries(entries: LeaderboardRawEntry[]): RankedEntry[] {
-    // Access DEFAULT_SCORING_PARAMS values with fallback defaults to handle test environments
-    const defaultN0 = DEFAULT_SCORING_PARAMS?.N0 ?? 30;
-    const defaultN1 = DEFAULT_SCORING_PARAMS?.N1 ?? 300;
-    const defaultEPS = DEFAULT_SCORING_PARAMS?.EPS ?? 0.01;
-
+    // Build scoring params from defaults with optional env overrides
     const scoringParams: ScoringParams = {
-      // Can be overridden via environment variables if needed
-      N0: Number(process.env.SCORING_N0 ?? defaultN0),
-      N1: Number(process.env.SCORING_N1 ?? defaultN1),
-      EPS: Number(process.env.SCORING_EPS ?? defaultEPS),
+      smoothPnlWeight: Number(process.env.SCORING_SMOOTH_PNL_WEIGHT ?? DEFAULT_SCORING_PARAMS.smoothPnlWeight),
+      winRateWeight: Number(process.env.SCORING_WIN_RATE_WEIGHT ?? DEFAULT_SCORING_PARAMS.winRateWeight),
+      pnlWeight: Number(process.env.SCORING_PNL_WEIGHT ?? DEFAULT_SCORING_PARAMS.pnlWeight),
+      tradeFreqWeight: Number(process.env.SCORING_TRADE_FREQ_WEIGHT ?? DEFAULT_SCORING_PARAMS.tradeFreqWeight),
+      optimalTrades: Number(process.env.SCORING_OPTIMAL_TRADES ?? DEFAULT_SCORING_PARAMS.optimalTrades),
+      tradeSigma: Number(process.env.SCORING_TRADE_SIGMA ?? DEFAULT_SCORING_PARAMS.tradeSigma),
+      pnlReference: Number(process.env.SCORING_PNL_REFERENCE ?? DEFAULT_SCORING_PARAMS.pnlReference),
     };
 
     const base = entries
@@ -188,28 +212,22 @@ export class LeaderboardService {
         const executed = Number(entry.executedOrders ?? 0);
         const pnl = Number(entry.realizedPnl ?? 0);
         const efficiency = executed > 0 ? pnl / executed : pnl;
-        const pnlConsistency = computeConsistency(entry.pnlList || []);
-
-        // Extract starting equity from meta if available, otherwise estimate from PnL
-        // Use accountValue or estimate based on typical leverage ratios
-        const startingEquity = Number(entry.accountValue ?? entry.startingEquity ?? Math.max(Math.abs(pnl) * 10, 10000));
 
         // Estimate wins/losses from win rate and trade count
         const numTrades = executed;
         const numWins = Math.round(numTrades * winRate);
         const numLosses = numTrades - numWins;
 
-        // Get max drawdown (default to small value if not available)
-        const maxDrawdown = Math.abs(Number(entry.maxDrawdown ?? 0.01));
+        // Get pnlList for smooth PnL score calculation
+        const pnlList = entry.pnlList || [];
 
-        // Compute score using the new formula
+        // Compute score using the new formula with pnlList
         const scoringResult = computePerformanceScore({
           realizedPnl: pnl,
-          startingEquity,
           numTrades,
           numWins,
           numLosses,
-          maxDrawdown,
+          pnlList,
         }, scoringParams);
 
         return {
@@ -219,18 +237,17 @@ export class LeaderboardService {
           executedOrders: executed,
           realizedPnl: pnl,
           efficiency,
-          pnlConsistency,
+          pnlConsistency: scoringResult.details.smoothPnlScore, // Use smooth PnL as consistency metric
           remark: entry.remark ?? null,
           labels: entry.labels || [],
           statOpenPositions: null,
           statClosedPositions: null,
           statAvgPosDuration: null,
           statTotalPnl: null,
-          statMaxDrawdown: maxDrawdown,
+          statMaxDrawdown: null,
           meta: {
             ...entry,
             scoringDetails: scoringResult.details,
-            startingEquity,
             numWins,
             numLosses,
           },
@@ -238,7 +255,7 @@ export class LeaderboardService {
       })
       .filter((entry) => Number.isFinite(entry.score));
 
-    // Filter out suspicious 100% win rates with many trades
+    // Filter out suspicious 100% win rates with many trades (already penalized in scoring, but extra filter)
     let scored = base.filter((entry) => entry.winRate < 0.999 || entry.executedOrders < 10);
     if (!scored.length) scored = base;
 

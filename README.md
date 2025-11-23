@@ -93,6 +93,7 @@ Key variables (see `.env.example`):
 | `LEADERBOARD_SELECT_COUNT` | `12` | Auto-tracked addresses pushed to hl-stream/hl-sage |
 | `LEADERBOARD_PERIODS` | `7,30` | Leaderboard periods (days) to crawl |
 | `LEADERBOARD_REFRESH_MS` | `86400000` | Crawl cadence (ms) |
+| `LEADERBOARD_SORT` | `3` | Sort order: 0=WinRate, 1=AccountValue, 3=PnL, 4=Trades, 5=ProfitableTrades, 6=LastOp, 7=AvgHold, 8=Positions |
 | `LEADERBOARD_ENRICH_COUNT` | `12` | How many ranked wallets to enrich with stats + curves per refresh |
 | `LEADERBOARD_STATS_CONCURRENCY` | `4` | Parallel Hyperbot `query-addr-stat` requests |
 | `LEADERBOARD_SERIES_CONCURRENCY` | `2` | Parallel Hyperliquid `portfolio` requests |

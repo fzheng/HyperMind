@@ -37,7 +37,7 @@ import {
   getCustomAccountCount,
   getLastRefreshTime
 } from '@hl/ts-lib';
-import LeaderboardService from './leaderboard';
+import LeaderboardService, { LeaderboardSort } from './leaderboard';
 
 const OWNER_TOKEN = getOwnerToken();
 const logger = createLogger('hl-scout');
@@ -298,6 +298,12 @@ async function main() {
   await ensureStream(nats.jsm, 'HL_A', [topic]);
   await bootstrapCandidates(topic, nats.js);
 
+  // Parse LEADERBOARD_SORT env var (default: 3 = PNL)
+  const parsedSort = Number(process.env.LEADERBOARD_SORT ?? LeaderboardSort.PNL);
+  const leaderboardSort = Object.values(LeaderboardSort).includes(parsedSort)
+    ? (parsedSort as LeaderboardSort)
+    : LeaderboardSort.PNL;
+
   const leaderboardOptions = {
     apiUrl: process.env.LEADERBOARD_API_URL,
     topN: Number(process.env.LEADERBOARD_TOP_N ?? 1000),
@@ -306,6 +312,7 @@ async function main() {
     refreshMs: Number(process.env.LEADERBOARD_REFRESH_MS ?? 24 * 60 * 60 * 1000),
     pageSize: Number(process.env.LEADERBOARD_PAGE_SIZE ?? 100),
     enrichCount: Number(process.env.LEADERBOARD_ENRICH_COUNT ?? process.env.LEADERBOARD_SELECT_COUNT ?? 12),
+    sort: leaderboardSort,
   };
   leaderboardService = new LeaderboardService(leaderboardOptions, async (candidate) => {
     await publishCandidate(topic, nats.js, candidate);

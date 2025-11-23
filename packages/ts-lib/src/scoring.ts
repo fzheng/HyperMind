@@ -2,58 +2,92 @@
  * Performance Scoring Module
  *
  * Implements a composite performance score for ranking trading accounts.
- * The formula balances return, win rate reliability, trade frequency, and risk.
+ * The formula balances:
+ * 1. Smooth PnL Score - performance over time (monotonicity, drawdowns)
+ * 2. Win Rate - with Laplace smoothing (penalize 100% win rates)
+ * 3. Realized PnL - modest weight (whales can make bad trades)
+ * 4. Trade Count - prefer moderate activity (not too many)
  *
  * @module scoring
  */
 
 /**
  * Hyperparameters for the scoring formula.
- * These can be adjusted to tune the ranking behavior.
  */
 export interface ScoringParams {
   /**
-   * N0: Number of trades needed for win rate to be considered reliable.
-   * Higher values require more trades before trusting the win rate.
-   * Default: 30
+   * Weight for smooth PnL score component (0-1).
+   * Default: 0.45
    */
-  N0: number;
+  smoothPnlWeight: number;
 
   /**
-   * N1: Number of trades where "too high frequency" starts being penalized.
-   * Earning the same return with fewer trades is considered better.
-   * Default: 300
+   * Weight for adjusted win rate component (0-1).
+   * Default: 0.30
    */
-  N1: number;
+  winRateWeight: number;
 
   /**
-   * EPS: Small constant to avoid division by zero when maxDrawdown is 0.
-   * Default: 0.01
+   * Weight for normalized PnL component (0-1).
+   * Default: 0.15
    */
-  EPS: number;
+  pnlWeight: number;
+
+  /**
+   * Weight for trade frequency component (0-1).
+   * Default: 0.10
+   */
+  tradeFreqWeight: number;
+
+  /**
+   * Optimal number of trades (trades around this are preferred).
+   * Default: 100
+   */
+  optimalTrades: number;
+
+  /**
+   * Spread for trade count preference (Gaussian-like decay).
+   * Default: 150
+   */
+  tradeSigma: number;
+
+  /**
+   * Reference PnL for log normalization.
+   * Default: 100000
+   */
+  pnlReference: number;
 }
 
 /**
  * Default scoring parameters
  */
 export const DEFAULT_SCORING_PARAMS: ScoringParams = {
-  N0: 30,   // trades needed for win rate reliability
-  N1: 300,  // trades where high-frequency penalty starts
-  EPS: 0.01 // epsilon for drawdown denominator
+  smoothPnlWeight: 0.45,
+  winRateWeight: 0.30,
+  pnlWeight: 0.15,
+  tradeFreqWeight: 0.10,
+  optimalTrades: 100,
+  tradeSigma: 150,
+  pnlReference: 100000,
 };
 
 /**
+ * PnL time series point - supports multiple formats
+ */
+export type PnlPoint =
+  | number
+  | [number, number]
+  | [number, string]
+  | { timestamp?: number; value?: number | string; pnl?: number | string };
+
+/**
  * Account statistics required for performance scoring.
- * All numeric fields should be validated before passing to scoring functions.
  */
 export interface AccountStats {
   /** Realized PnL over the period (can be negative) */
   realizedPnl: number;
 
-  /** Account equity at start of period (or average equity) */
-  startingEquity: number;
-
-  /** Total number of closed trades (numWins + numLosses) */
+  /** Total number of closed trades */
   numTrades: number;
 
   /** Number of winning trades */
@@ -62,54 +96,221 @@ export interface AccountStats {
   /** Number of losing trades */
   numLosses: number;
 
-  /**
-   * Maximum drawdown as a positive fraction.
-   * Example: 0.25 represents a -25% drawdown.
-   * Must be >= 0.
-   */
-  maxDrawdown: number;
+  /** PnL time series for smooth PnL calculation */
+  pnlList?: PnlPoint[];
 }
 
 /**
  * Result of computing a performance score for an account.
  */
 export interface ScoringResult {
-  /** Final composite performance score */
+  /** Final composite performance score (higher = better) */
   score: number;
 
   /** Intermediate calculation values for debugging/display */
   details: {
-    /** Normalized return: realizedPnl / startingEquity */
-    normalizedReturn: number;
+    /** Smooth PnL score [0, 1] */
+    smoothPnlScore: number;
 
-    /** Base win rate with Laplace smoothing */
-    baseWinRate: number;
+    /** Raw win rate before adjustments */
+    rawWinRate: number;
 
-    /** Adjusted win rate (penalized if zero losses) */
+    /** Adjusted win rate with Laplace smoothing and 100% penalty */
     adjWinRate: number;
 
-    /** Trade count reliability factor [0, 1) */
-    reliability: number;
+    /** Normalized PnL score [0, 1] */
+    normalizedPnl: number;
 
-    /** High-frequency trading penalty factor (0, 1] */
-    freqPenalty: number;
+    /** Trade frequency score [0, 1] */
+    tradeFreqScore: number;
 
-    /** Denominator: EPS + maxDrawdown */
-    denominator: number;
+    /** Component scores weighted */
+    weightedComponents: {
+      smoothPnl: number;
+      winRate: number;
+      pnl: number;
+      tradeFreq: number;
+    };
   };
 }
 
 /**
- * Computes the performance score for a single account.
+ * Computes the Smooth PnL Score from a PnL time series.
  *
- * Formula breakdown:
- * 1. r = realizedPnl / startingEquity (normalized return)
- * 2. baseWinRate = (numWins + 1) / (numWins + numLosses + 2) (Laplace smoothing)
- * 3. adjWinRate = 0.8 * baseWinRate if numLosses == 0, else baseWinRate
- * 4. reliability = numTrades / (numTrades + N0)
- * 5. freqPenalty = N1 / (numTrades + N1)
- * 6. denominator = EPS + maxDrawdown
- * 7. score = (r * adjWinRate * reliability * freqPenalty) / denominator
+ * The metric rewards:
+ * - Higher final PnL
+ * - More monotonic up moves
+ * - Smaller & shorter drawdowns
+ *
+ * @param pnlList - Array of PnL points in time order
+ * @returns Non-negative float [0, ~0.5] (higher = better)
+ */
+export function computeSmoothPnlScore(pnlList: PnlPoint[]): number {
+  // Extract numeric PnL values in time order
+  const values: number[] = [];
+
+  for (const pt of pnlList) {
+    let v: number | string | undefined;
+
+    if (Array.isArray(pt)) {
+      // [timestamp, pnl] - take last element
+      v = pt[pt.length - 1];
+    } else if (typeof pt === 'object' && pt !== null) {
+      // Try common keys
+      v = pt.pnl ?? pt.value;
+    } else {
+      // Assume it's already a number/string
+      v = pt;
+    }
+
+    const parsed = typeof v === 'string' ? parseFloat(v) : v;
+    if (typeof parsed === 'number' && Number.isFinite(parsed)) {
+      values.push(parsed);
+    }
+  }
+
+  // Not enough data -> no meaningful score
+  if (values.length < 2) {
+    return 0;
+  }
+
+  // Normalize series to start at 0 (focus on shape & change)
+  const base = values[0];
+  const x = values.map((v) => v - base); // x[0] == 0
+
+  const n = x.length;
+
+  // Drawdown series, Max Drawdown (MDD), Ulcer Index
+  let peak = x[0];
+  let mdd = 0;
+  let ddSqSum = 0;
+
+  for (const xi of x) {
+    if (xi > peak) {
+      peak = xi;
+    }
+
+    let dd = 0;
+    if (peak > 0) {
+      dd = (peak - xi) / peak; // fractional drawdown from peak
+      if (dd < 0) dd = 0;
+    }
+
+    mdd = Math.max(mdd, dd);
+    ddSqSum += dd * dd;
+  }
+
+  const ulcer = Math.sqrt(ddSqSum / n); // Ulcer Index
+
+  // Monotonicity: fraction of up steps
+  let upCount = 0;
+  for (let i = 1; i < n; i++) {
+    if (x[i] > x[i - 1]) {
+      upCount++;
+    }
+  }
+  const upFrac = upCount / (n - 1);
+
+  // Return component (scale-invariant, based on final vs path range)
+  const last = x[n - 1];
+  const maxAbs = Math.max(...x.map((v) => Math.abs(v)));
+
+  let R = 0;
+  if (last > 0 && maxAbs > 0) {
+    // 0..1: how close final PnL is to the best level reached
+    R = last / maxAbs;
+  }
+
+  // Final SmoothPnlScore
+  // Denominator includes 1 to keep it stable even with tiny drawdowns
+  const score = (Math.max(0, R) * upFrac) / (1 + mdd + ulcer);
+
+  return Number.isFinite(score) ? score : 0;
+}
+
+/**
+ * Computes adjusted win rate with Laplace smoothing and 100% penalty.
+ *
+ * @param numWins - Number of winning trades
+ * @param numLosses - Number of losing trades
+ * @returns Adjusted win rate [0, 1]
+ */
+export function computeAdjustedWinRate(numWins: number, numLosses: number): number {
+  // Laplace (add-one) smoothing to prevent extreme values with few trades
+  const baseWinRate = (numWins + 1) / (numWins + numLosses + 2);
+
+  // Penalize suspicious 100% win rates (too good to be true)
+  if (numLosses === 0 && numWins > 0) {
+    return 0.7 * baseWinRate; // 30% penalty for zero losses
+  }
+
+  // Also penalize very high win rates with many trades (likely manipulation)
+  if (baseWinRate > 0.95 && numWins + numLosses > 20) {
+    return 0.8 * baseWinRate;
+  }
+
+  return baseWinRate;
+}
+
+/**
+ * Computes normalized PnL score using log scaling.
+ *
+ * @param realizedPnl - Realized PnL (can be negative)
+ * @param reference - Reference PnL for normalization
+ * @returns Score [0, 1] where 1 = excellent, 0 = poor/negative
+ */
+export function computeNormalizedPnl(realizedPnl: number, reference: number): number {
+  if (realizedPnl <= 0) {
+    return 0;
+  }
+
+  // Log scale: log10(pnl) normalized by log10(reference)
+  // This gives diminishing returns for extremely large PnLs
+  const logPnl = Math.log10(realizedPnl + 1);
+  const logRef = Math.log10(reference);
+
+  // Clamp to [0, 1]
+  return Math.min(1, Math.max(0, logPnl / logRef));
+}
+
+/**
+ * Computes trade frequency score.
+ * Prefers moderate activity - not too few (unreliable) or too many (overtrading).
+ *
+ * @param numTrades - Number of trades
+ * @param optimal - Optimal number of trades
+ * @param sigma - Spread for preference decay
+ * @returns Score [0, 1] centered around optimal
+ */
+export function computeTradeFreqScore(
+  numTrades: number,
+  optimal: number,
+  sigma: number
+): number {
+  if (numTrades <= 0) {
+    return 0;
+  }
+
+  // Gaussian-like decay from optimal
+  const diff = numTrades - optimal;
+  const score = Math.exp(-(diff * diff) / (2 * sigma * sigma));
+
+  // Bonus reduction for too many trades (overtrading)
+  if (numTrades > optimal * 3) {
+    return score * 0.5;
+  }
+
+  return score;
+}
+
+/**
+ * Computes the composite performance score for a single account.
+ *
+ * Formula:
+ * score = smoothPnlWeight * smoothPnlScore
+ *       + winRateWeight * adjWinRate
+ *       + pnlWeight * normalizedPnl
+ *       + tradeFreqWeight * tradeFreqScore
  *
  * @param stats - Account statistics for the period
  * @param params - Scoring hyperparameters (optional, uses defaults)
@@ -119,83 +320,89 @@ export function computePerformanceScore(
   stats: AccountStats,
   params: ScoringParams = DEFAULT_SCORING_PARAMS
 ): ScoringResult {
-  const { N0, N1, EPS } = params;
-  const { realizedPnl, startingEquity, numTrades, numWins, numLosses, maxDrawdown } = stats;
+  const { realizedPnl, numTrades, numWins, numLosses, pnlList } = stats;
 
-  // Validate inputs to avoid NaN/Infinity
-  if (!Number.isFinite(startingEquity) || startingEquity <= 0) {
-    return createZeroResult('Invalid startingEquity');
-  }
-  if (!Number.isFinite(realizedPnl)) {
-    return createZeroResult('Invalid realizedPnl');
-  }
+  // Validate inputs
   if (!Number.isFinite(numTrades) || numTrades < 0) {
-    return createZeroResult('Invalid numTrades');
+    return createZeroResult();
   }
   if (!Number.isFinite(numWins) || numWins < 0) {
-    return createZeroResult('Invalid numWins');
+    return createZeroResult();
   }
   if (!Number.isFinite(numLosses) || numLosses < 0) {
-    return createZeroResult('Invalid numLosses');
-  }
-  if (!Number.isFinite(maxDrawdown) || maxDrawdown < 0) {
-    return createZeroResult('Invalid maxDrawdown');
+    return createZeroResult();
   }
 
-  // Step 1: Compute 30-day return normalized by account size
-  const normalizedReturn = realizedPnl / startingEquity;
+  // 1. Compute smooth PnL score from time series
+  const smoothPnlScore = pnlList && pnlList.length >= 2
+    ? computeSmoothPnlScore(pnlList)
+    : 0;
 
-  // Step 2: Compute smoothed win rate using Laplace (add-one) smoothing
-  // This prevents 100% win rate with few trades from dominating
-  const baseWinRate = (numWins + 1.0) / (numWins + numLosses + 2.0);
+  // 2. Compute adjusted win rate
+  const rawWinRate = numWins + numLosses > 0
+    ? numWins / (numWins + numLosses)
+    : 0;
+  const adjWinRate = computeAdjustedWinRate(numWins, numLosses);
 
-  // Step 3: Apply extra penalty if zero losing trades (suspicious 100% win rate)
-  const adjWinRate = numLosses === 0 ? 0.8 * baseWinRate : baseWinRate;
+  // 3. Compute normalized PnL
+  const normalizedPnl = computeNormalizedPnl(
+    realizedPnl ?? 0,
+    params.pnlReference
+  );
 
-  // Step 4: Compute trade-count reliability factor
-  // Makes statistics with very few trades less trusted
-  // Approaches 1 as numTrades increases, starts at 0
-  const reliability = numTrades / (numTrades + N0);
+  // 4. Compute trade frequency score
+  const tradeFreqScore = computeTradeFreqScore(
+    numTrades,
+    params.optimalTrades,
+    params.tradeSigma
+  );
 
-  // Step 5: Compute high-frequency penalty
-  // Earning the same return with fewer trades is better
-  // Approaches 1 when numTrades is small, shrinks as numTrades grows
-  const freqPenalty = N1 / (numTrades + N1);
+  // 5. Compute weighted components
+  const weightedSmooth = params.smoothPnlWeight * smoothPnlScore;
+  const weightedWinRate = params.winRateWeight * adjWinRate;
+  const weightedPnl = params.pnlWeight * normalizedPnl;
+  const weightedFreq = params.tradeFreqWeight * tradeFreqScore;
 
-  // Step 6: Use max drawdown as penalty in denominator
-  // Lower drawdown = higher score
-  const denominator = EPS + maxDrawdown;
-
-  // Step 7: Compute final composite performance score
-  const score = (normalizedReturn * adjWinRate * reliability * freqPenalty) / denominator;
+  // 6. Final composite score
+  const score = weightedSmooth + weightedWinRate + weightedPnl + weightedFreq;
 
   return {
     score: Number.isFinite(score) ? score : 0,
     details: {
-      normalizedReturn,
-      baseWinRate,
+      smoothPnlScore,
+      rawWinRate,
       adjWinRate,
-      reliability,
-      freqPenalty,
-      denominator
-    }
+      normalizedPnl,
+      tradeFreqScore,
+      weightedComponents: {
+        smoothPnl: weightedSmooth,
+        winRate: weightedWinRate,
+        pnl: weightedPnl,
+        tradeFreq: weightedFreq,
+      },
+    },
   };
 }
 
 /**
  * Creates a zero-score result for invalid inputs
  */
-function createZeroResult(_reason: string): ScoringResult {
+function createZeroResult(): ScoringResult {
   return {
     score: 0,
     details: {
-      normalizedReturn: 0,
-      baseWinRate: 0,
+      smoothPnlScore: 0,
+      rawWinRate: 0,
       adjWinRate: 0,
-      reliability: 0,
-      freqPenalty: 1,
-      denominator: DEFAULT_SCORING_PARAMS.EPS
-    }
+      normalizedPnl: 0,
+      tradeFreqScore: 0,
+      weightedComponents: {
+        smoothPnl: 0,
+        winRate: 0,
+        pnl: 0,
+        tradeFreq: 0,
+      },
+    },
   };
 }
 
@@ -244,7 +451,7 @@ export function rankAccounts(
       stats: account.stats,
       details: result.details,
       isCustom: account.isCustom ?? false,
-      meta: account.meta
+      meta: account.meta,
     };
   });
 
@@ -254,7 +461,7 @@ export function rankAccounts(
   // Assign ranks (1-based)
   return scored.map((account, index) => ({
     ...account,
-    rank: index + 1
+    rank: index + 1,
   }));
 }
 
@@ -281,7 +488,7 @@ export function selectAndRankAccounts(
       ...account,
       score: result.score,
       details: result.details,
-      isCustom: false
+      isCustom: false,
     };
   });
 
@@ -296,7 +503,7 @@ export function selectAndRankAccounts(
       ...account,
       score: result.score,
       details: result.details,
-      isCustom: true
+      isCustom: true,
     };
   });
 
@@ -320,7 +527,7 @@ export function selectAndRankAccounts(
     stats: account.stats,
     details: account.details,
     isCustom: account.isCustom,
-    meta: account.meta
+    meta: account.meta,
   }));
 }
 
@@ -334,10 +541,6 @@ export function selectAndRankAccounts(
 export function mapToAccountStats(entry: {
   realizedPnl?: number;
   realized_pnl?: number;
-  startingEquity?: number;
-  starting_equity?: number;
-  accountValue?: number;
-  account_value?: number;
   numTrades?: number;
   num_trades?: number;
   executedOrders?: number;
@@ -350,17 +553,11 @@ export function mapToAccountStats(entry: {
   num_losses?: number;
   winRate?: number;
   win_rate?: number;
-  maxDrawdown?: number;
-  max_drawdown?: number;
-  statMaxDrawdown?: number;
-  stat_max_drawdown?: number;
+  pnlList?: PnlPoint[];
+  pnl_list?: PnlPoint[];
 }): AccountStats {
   // Get realized PnL
   const realizedPnl = entry.realizedPnl ?? entry.realized_pnl ?? 0;
-
-  // Get starting equity (use account value as fallback)
-  const startingEquity = entry.startingEquity ?? entry.starting_equity ??
-    entry.accountValue ?? entry.account_value ?? 1;
 
   // Get number of trades
   const numTrades = entry.numTrades ?? entry.num_trades ??
@@ -378,17 +575,14 @@ export function mapToAccountStats(entry: {
     numLosses = numTrades - numWins;
   }
 
-  // Get max drawdown (ensure it's positive)
-  const rawDrawdown = entry.maxDrawdown ?? entry.max_drawdown ??
-    entry.statMaxDrawdown ?? entry.stat_max_drawdown ?? 0;
-  const maxDrawdown = Math.abs(rawDrawdown);
+  // Get PnL list
+  const pnlList = entry.pnlList ?? entry.pnl_list ?? [];
 
   return {
     realizedPnl,
-    startingEquity: Math.max(startingEquity, 1), // Avoid division by zero
     numTrades,
     numWins,
     numLosses,
-    maxDrawdown
+    pnlList,
   };
 }
