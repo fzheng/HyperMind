@@ -624,12 +624,13 @@ async function main() {
         return;
       }
 
-      // Check if account already exists in system-ranked entries
+      // Check if account already exists in top 10 system-ranked entries
+      // Only block if it's already in the top performers shown in UI
       if (leaderboardService) {
         const existingEntry = await leaderboardService.isSystemRankedAccount(address);
-        if (existingEntry) {
+        if (existingEntry && existingEntry.rank <= 10) {
           res.status(400).json({
-            error: 'Account already exists in system rankings',
+            error: 'Account already exists in top 10 system rankings',
             rank: existingEntry.rank,
             score: existingEntry.score,
           });
