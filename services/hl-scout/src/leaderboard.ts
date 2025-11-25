@@ -524,12 +524,14 @@ export class LeaderboardService {
   /**
    * Fetch and analyze BTC/ETH trades for an address.
    * Returns analysis of BTC+ETH PnL contribution to total PnL.
+   * Only considers trades lasting at least 10 minutes (excludes scalping).
    *
    * API: GET https://hyperbot.network/api/leaderboard/smart/completed-trades/{address}?take=2000
    */
   private async analyzeBtcEthTrades(address: string, totalPnl: number): Promise<BtcEthAnalysis> {
     const normalized = normalizeAddress(address);
     const url = `${this.smartApiBase}completed-trades/${encodeURIComponent(normalized)}?take=2000`;
+    const MIN_TRADE_DURATION_MS = 10 * 60 * 1000; // 10 minutes
 
     try {
       const payload = await this.requestJson<any>(url, { method: 'GET' }, 2, 8000);
@@ -541,6 +543,21 @@ export class LeaderboardService {
       for (const trade of trades) {
         const coin = String(trade.coin || '').toUpperCase();
         const pnl = Number(trade.pnl || 0);
+
+        // Skip trades that are not BTC or ETH
+        if (coin !== 'BTC' && coin !== 'ETH') {
+          continue;
+        }
+
+        // Calculate trade duration
+        const startTime = new Date(trade.startTime).getTime();
+        const endTime = new Date(trade.endTime).getTime();
+        const durationMs = endTime - startTime;
+
+        // Skip scalping trades (< 10 minutes)
+        if (durationMs < MIN_TRADE_DURATION_MS) {
+          continue;
+        }
 
         if (coin === 'BTC') {
           btcPnl += pnl;

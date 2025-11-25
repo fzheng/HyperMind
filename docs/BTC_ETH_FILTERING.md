@@ -43,18 +43,20 @@ GET https://hyperbot.network/api/leaderboard/smart/completed-trades/{address}?ta
 
 ## Filtering Rules
 
+**Trade Duration Filter**: Only trades lasting **at least 10 minutes** are included in the BTC/ETH PnL calculation. This excludes scalping trades to focus on meaningful position trading.
+
 ### Rule 1: Negative BTC+ETH PnL
-**Condition**: `btcPnl + ethPnl < 0`
+**Condition**: `btcPnl + ethPnl < 0` (from trades ≥10 min)
 **Action**: Skip account
 **Reason**: Account has losing performance on major cryptocurrencies
 
 ### Rule 2: Insufficient BTC+ETH Contribution
-**Condition**: `(btcPnl + ethPnl) / totalPnl < 0.10` (less than 10%)
+**Condition**: `(btcPnl + ethPnl) / totalPnl < 0.10` (less than 10%, from trades ≥10 min)
 **Action**: Skip account
 **Reason**: Account's profits are not significantly derived from BTC/ETH trading
 
 ### Rule 3: Qualified Accounts
-**Condition**: `(btcPnl + ethPnl) / totalPnl >= 0.10` AND `btcPnl + ethPnl >= 0`
+**Condition**: `(btcPnl + ethPnl) / totalPnl >= 0.10` AND `btcPnl + ethPnl >= 0` (from trades ≥10 min)
 **Action**: Include account
 **Result**: Account trades BTC/ETH profitably with significant contribution to total PnL
 
@@ -97,6 +99,35 @@ Environment variables controlling this feature:
 
 - `LEADERBOARD_SELECT_COUNT`: Target number of qualified accounts (default: 12, but typically want 10)
 - `LEADERBOARD_ENRICH_COUNT`: Number of candidates to enrich/analyze (default: same as SELECT_COUNT)
+
+## Calculation Method
+
+For each candidate account:
+
+1. **Fetch trades**: Retrieve up to 2000 most recent completed trades from Hyperbot API
+2. **Filter by duration**: Only include trades where `endTime - startTime >= 10 minutes`
+3. **Filter by coin**: Only process trades where `coin` field equals "BTC" or "ETH" (case-insensitive)
+4. **Sum PnL**: Aggregate `pnl` values separately for BTC and ETH
+5. **Calculate ratio**: `btcEthRatio = |btcEthPnl| / totalPnl`
+6. **Apply rules**: Check if account qualifies based on negativity and contribution threshold
+
+**Example Calculation**:
+```javascript
+// From 2000 trades, filter by duration >= 10 minutes
+const longTrades = trades.filter(t => {
+  const duration = new Date(t.endTime) - new Date(t.startTime);
+  return duration >= 600000; // 10 minutes in milliseconds
+});
+
+// Sum BTC/ETH PnL from long trades only
+const btcPnl = longTrades
+  .filter(t => t.coin === 'BTC')
+  .reduce((sum, t) => sum + t.pnl, 0);
+
+const ethPnl = longTrades
+  .filter(t => t.coin === 'ETH')
+  .reduce((sum, t) => sum + t.pnl, 0);
+```
 
 ## Data Storage
 
