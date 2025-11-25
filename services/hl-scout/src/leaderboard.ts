@@ -983,9 +983,13 @@ export class LeaderboardService {
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         ON CONFLICT (period_days, lower(address)) DO UPDATE SET
+          rank = EXCLUDED.rank,
+          score = EXCLUDED.score,
+          weight = EXCLUDED.weight,
           win_rate = EXCLUDED.win_rate,
           executed_orders = EXCLUDED.executed_orders,
           realized_pnl = EXCLUDED.realized_pnl,
+          pnl_consistency = EXCLUDED.pnl_consistency,
           efficiency = EXCLUDED.efficiency,
           remark = COALESCE(EXCLUDED.remark, hl_leaderboard_entries.remark),
           labels = EXCLUDED.labels,
