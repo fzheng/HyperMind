@@ -231,10 +231,11 @@ export class LeaderboardService {
       this.logger.warn('custom_account_auto_convert_failed', { err: err?.message });
     }
 
-    await this.persistPeriod(period, ranked, tracked, hyperliquidSeries);
-
     // Apply BTC/ETH filtering to get top qualified candidates
     const qualifiedCandidates = await this.filterBtcEthQualified(ranked, this.opts.selectCount);
+
+    // Persist with qualified flags
+    await this.persistPeriod(period, ranked, tracked, hyperliquidSeries);
     await this.publishTopCandidates(period, qualifiedCandidates);
 
     this.logger.info('leaderboard_updated', {
@@ -1029,6 +1030,10 @@ export class LeaderboardService {
           stat_max_drawdown
         FROM hl_leaderboard_entries
         WHERE period_days = $1
+          AND (
+            metrics->'raw'->>'custom' = 'true'
+            OR (metrics->'raw'->'btcEthAnalysis'->>'qualified')::boolean IS TRUE
+          )
         ORDER BY weight DESC, rank ASC
         LIMIT $2
       `,
