@@ -71,13 +71,22 @@ function formatHolding(entry) {
 
 function normalizeHoldings(raw = {}) {
   const normalized = {};
-  Object.entries(raw).forEach(([addr, pos]) => {
+  Object.entries(raw).forEach(([addr, positions]) => {
     if (!addr) return;
     const key = addr.toLowerCase();
-    normalized[key] = {
-      symbol: (pos?.symbol || '').toUpperCase(),
-      size: Number(pos?.size ?? 0),
-    };
+    // Handle both old format (single position object) and new format (array of positions)
+    if (Array.isArray(positions)) {
+      normalized[key] = positions.map(pos => ({
+        symbol: (pos?.symbol || '').toUpperCase(),
+        size: Number(pos?.size ?? 0),
+      }));
+    } else {
+      // Legacy single position format
+      normalized[key] = [{
+        symbol: (positions?.symbol || '').toUpperCase(),
+        size: Number(positions?.size ?? 0),
+      }];
+    }
   });
   return normalized;
 }
@@ -133,7 +142,10 @@ function renderAddresses(stats = [], profiles = {}, holdings = {}) {
             : null;
       const tradesCell = tradesValue === null ? placeholder() : tradesValue;
       const holdingKey = row.address?.toLowerCase() || '';
-      const holdingCell = holdings[holdingKey] ? formatHolding(holdings[holdingKey]) : placeholder('No live position');
+      const holdingPositions = holdings[holdingKey] || [];
+      const holdingCell = holdingPositions.length > 0
+        ? holdingPositions.map(pos => formatHolding(pos)).join(' ')
+        : placeholder('No live position');
       const pnlCell = typeof row.realizedPnl === 'number' ? fmtUsdShort(row.realizedPnl) : placeholder();
       const scoreCell = typeof row.score === 'number' ? fmtScore(row.score) : placeholder();
       const isCustom = row.isCustom === true;

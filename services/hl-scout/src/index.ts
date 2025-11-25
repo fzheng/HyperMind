@@ -523,21 +523,26 @@ async function main() {
       profiles[entry.address] = entry.profile;
     }
 
-    // Get holdings for all accounts
-    const holdings: Record<string, { symbol: string; size: number }> = {};
+    // Get holdings for all accounts (BTC and ETH positions)
+    const holdings: Record<string, Array<{ symbol: string; size: number }>> = {};
     if (allEntries.length) {
       const pool = await getPool();
       const { rows } = await pool.query(
-        'select address, symbol, size from hl_current_positions where lower(address) = any($1)',
+        `select address, symbol, size from hl_current_positions
+         where lower(address) = any($1)
+         and symbol in ('BTC', 'ETH')
+         and abs(size) >= 0.0001
+         order by address, symbol`,
         [allEntries.map((s) => s.address.toLowerCase())]
       );
       for (const row of rows) {
         const addr = String(row.address || '').toLowerCase();
         if (!addr) continue;
-        holdings[addr] = {
+        if (!holdings[addr]) holdings[addr] = [];
+        holdings[addr].push({
           symbol: String(row.symbol || 'BTC').toUpperCase(),
           size: Number(row.size || 0),
-        };
+        });
       }
     }
 
