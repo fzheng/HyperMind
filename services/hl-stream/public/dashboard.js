@@ -142,6 +142,8 @@ let fillsOldestTime = null;
 let fillsNewestTime = null;
 let isLoadingMore = false;
 let hasMoreFills = true;
+let totalFillCount = 0;
+let isInitialLoad = true; // Prevent flashing during initial load
 
 // Aggregation settings: groups fills within 1-minute windows
 const AGGREGATION_WINDOW_MS = 60000; // 1 minute window
@@ -149,6 +151,9 @@ const MAX_AGGREGATED_GROUPS = 50; // Max groups to keep in memory
 
 // Streaming aggregation state - stores pre-aggregated groups
 let aggregatedGroups = [];
+
+// Track expanded groups for collapsible UI
+const expandedGroups = new Set();
 
 /**
  * Creates a new aggregation group from a single fill.
@@ -616,18 +621,76 @@ function updateTimeRangeDisplay() {
   timeRangeEl.textContent = `${oldestStr} → ${newestStr}`;
 }
 
-// Show/hide load history button based on fills state
-function updateLoadHistoryVisibility() {
-  const container = document.getElementById('fills-load-history');
-  if (!container) return;
+// Update fills count display
+function updateFillsCount() {
+  const countEl = document.getElementById('fills-count');
+  if (!countEl) return;
 
-  // Show button when there might be more history to load
-  // Hide only when we've confirmed there's no more history
-  if (!hasMoreFills) {
-    container.classList.add('hidden');
+  // Count total individual fills across all groups
+  totalFillCount = aggregatedGroups.reduce((sum, g) => sum + (g.fillCount || 1), 0);
+  const groupCount = aggregatedGroups.length;
+
+  if (totalFillCount === 0) {
+    countEl.textContent = '0 fills';
+  } else if (totalFillCount === groupCount) {
+    countEl.textContent = `${totalFillCount} fill${totalFillCount !== 1 ? 's' : ''}`;
   } else {
-    container.classList.remove('hidden');
+    countEl.textContent = `${totalFillCount} fills (${groupCount} groups)`;
   }
+}
+
+// Update fills status bar
+function updateFillsStatus() {
+  const statusBar = document.getElementById('fills-status-bar');
+  const statusMessage = document.getElementById('fills-status-message');
+  const loadBtn = document.getElementById('load-history-btn');
+
+  if (!statusBar || !statusMessage) return;
+
+  if (aggregatedGroups.length === 0) {
+    statusMessage.textContent = 'Waiting for live fills...';
+    if (loadBtn) {
+      loadBtn.textContent = 'Fetch History';
+      loadBtn.disabled = false;
+      loadBtn.classList.remove('loading');
+    }
+    statusBar.classList.remove('all-loaded');
+  } else if (!hasMoreFills) {
+    statusMessage.textContent = `All ${totalFillCount} fills loaded`;
+    statusBar.classList.add('all-loaded');
+  } else {
+    // Calculate time span
+    if (fillsOldestTime) {
+      const oldestDate = new Date(fillsOldestTime);
+      const now = new Date();
+      const hoursDiff = Math.round((now - oldestDate) / (1000 * 60 * 60));
+
+      if (hoursDiff < 1) {
+        statusMessage.textContent = `Showing last ${totalFillCount} fills (< 1 hour)`;
+      } else if (hoursDiff < 24) {
+        statusMessage.textContent = `Showing last ${totalFillCount} fills (~${hoursDiff}h)`;
+      } else {
+        const daysDiff = Math.round(hoursDiff / 24);
+        statusMessage.textContent = `Showing last ${totalFillCount} fills (~${daysDiff}d)`;
+      }
+    } else {
+      statusMessage.textContent = `Showing ${totalFillCount} fills`;
+    }
+
+    if (loadBtn) {
+      loadBtn.textContent = 'Load More';
+      loadBtn.disabled = false;
+      loadBtn.classList.remove('loading');
+    }
+    statusBar.classList.remove('all-loaded');
+  }
+}
+
+// Update all fills UI elements
+function updateFillsUI() {
+  updateFillsCount();
+  updateTimeRangeDisplay();
+  updateFillsStatus();
 }
 
 async function fetchJson(url) {
@@ -718,8 +781,9 @@ function renderAddresses(stats = [], profiles = {}, holdings = {}) {
       const nicknameDisplay = row.remark
         ? `<span class="nickname-display" data-address="${row.address}" data-nickname="${escapeHtml(row.remark)}" title="Click to edit nickname">${escapeHtml(row.remark)}</span>`
         : (isCustom ? `<span class="nickname-display nickname-empty" data-address="${row.address}" data-nickname="" title="Click to add nickname">+ Add nickname</span>` : '');
+      const addrLower = (row.address || '').toLowerCase();
       return `
-        <tr class="${isCustom ? 'custom-row' : ''}">
+        <tr class="${isCustom ? 'custom-row' : ''}" data-address="${addrLower}">
           <td data-label="Address" title="Score: ${scoreValue}">
             <span class="custom-indicator">
               ${customIndicator}
@@ -866,8 +930,18 @@ function renderAIRecommendations() {
   }
 }
 
+// Toggle group expansion - exposed globally for onclick handlers
+window.toggleGroupExpansion = function(groupId) {
+  if (expandedGroups.has(groupId)) {
+    expandedGroups.delete(groupId);
+  } else {
+    expandedGroups.add(groupId);
+  }
+  renderAggregatedFills();
+};
+
 // Render a single aggregated group as a table row
-function renderGroupRow(group) {
+function renderGroupRow(group, isNew = false) {
   const symbol = (group.symbol || 'BTC').toUpperCase();
   const sizeVal = group.isAggregated ? group.totalSize : Math.abs(group.size_signed || 0);
   const sizeSign = group.size_signed >= 0 ? '+' : '-';
@@ -880,13 +954,23 @@ function renderGroupRow(group) {
   const action = group.action || '—';
   const sideClass = action.toLowerCase().includes('short') ? 'sell' : 'buy';
 
-  // Show aggregation indicator with live update hint
-  const aggBadge = group.isAggregated
-    ? `<span class="agg-badge" title="${group.fillCount} fills aggregated within 1 min">×${group.fillCount}</span>`
-    : '';
+  const isExpanded = expandedGroups.has(group.id);
 
-  return `
-    <tr class="${group.isAggregated ? 'aggregated-row' : ''}" data-group-id="${group.id || ''}">
+  // Show aggregation badge with expand/collapse functionality
+  let aggBadge = '';
+  if (group.isAggregated) {
+    const expandIcon = isExpanded ? '▼' : '▶';
+    aggBadge = `<span class="agg-badge" onclick="toggleGroupExpansion('${group.id}')" title="Click to ${isExpanded ? 'collapse' : 'expand'} ${group.fillCount} fills">
+      <span class="expand-icon">${expandIcon}</span>×${group.fillCount}
+    </span>`;
+  }
+
+  // New fill animation class
+  const newClass = isNew ? 'new-fill-row' : '';
+
+  const addrLower = (group.address || '').toLowerCase();
+  let html = `
+    <tr class="${group.isAggregated ? 'aggregated-row' : ''} ${newClass}" data-group-id="${group.id || ''}" data-address="${addrLower}">
       <td data-label="Time">${fmtDateTime(group.time_utc)}</td>
       <td data-label="Address"><a href="https://hypurrscan.io/address/${group.address}" target="_blank" rel="noopener noreferrer">${shortAddress(group.address)}</a></td>
       <td data-label="Action"><span class="pill ${sideClass}">${action}</span>${aggBadge}</td>
@@ -896,26 +980,91 @@ function renderGroupRow(group) {
       <td data-label="Closed PnL">${pnl}</td>
     </tr>
   `;
+
+  // Add expandable details row for aggregated fills
+  if (group.isAggregated && isExpanded) {
+    const subFills = group.fills.map(fill => {
+      const fillSize = Math.abs(fill.size_signed || 0);
+      const fillPrice = fmtUsdShort(fill.price_usd ?? null);
+      const fillPnl = fmtUsdShort(fill.closed_pnl_usd ?? null);
+      const fillTime = fmtTime(fill.time_utc);
+      return `<div class="sub-fill">
+        <span>${fillTime}</span>
+        <span>${fillSize.toFixed(5)} ${symbol}</span>
+        <span>${fillPrice}</span>
+        <span>${fillPnl}</span>
+      </div>`;
+    }).join('');
+
+    html += `
+      <tr class="group-details expanded" data-parent-id="${group.id}">
+        <td colspan="7">
+          <div class="group-fills-list">${subFills}</div>
+        </td>
+      </tr>
+    `;
+  }
+
+  return html;
 }
 
 // Render all aggregated groups
 function renderAggregatedFills() {
   if (aggregatedGroups.length === 0) {
-    fillsTable.innerHTML = `<tr><td colspan="7" class="placeholder">No BTC/ETH fills yet</td></tr>`;
+    fillsTable.innerHTML = `<tr><td colspan="7">
+      <div class="fills-empty-state">
+        <span class="empty-icon">📊</span>
+        <p>No BTC/ETH fills yet</p>
+        <span class="empty-hint">Fills will appear here as they happen</span>
+      </div>
+    </td></tr>`;
+    updateFillsUI();
     return;
   }
 
   const rows = aggregatedGroups.map(group => renderGroupRow(group)).join('');
   fillsTable.innerHTML = rows;
 
-  // Update load history button visibility
-  updateLoadHistoryVisibility();
+  // Attach cross-highlight hover events
+  attachFillsHoverEvents();
+
+  // Update all UI elements
+  updateFillsUI();
+}
+
+// Cross-table highlight: hovering fills highlights matching leaderboard row
+function attachFillsHoverEvents() {
+  const fillRows = fillsTable.querySelectorAll('tr[data-address]');
+
+  fillRows.forEach(row => {
+    row.addEventListener('mouseenter', () => {
+      const addr = row.dataset.address;
+      if (!addr) return;
+      // Find matching row in leaderboard
+      const leaderboardRow = addressTable.querySelector(`tr[data-address="${addr}"]`);
+      if (leaderboardRow) {
+        leaderboardRow.classList.add('highlight-match');
+      }
+    });
+
+    row.addEventListener('mouseleave', () => {
+      const addr = row.dataset.address;
+      if (!addr) return;
+      const leaderboardRow = addressTable.querySelector(`tr[data-address="${addr}"]`);
+      if (leaderboardRow) {
+        leaderboardRow.classList.remove('highlight-match');
+      }
+    });
+  });
 }
 
 // Legacy function for initial load - initializes streaming aggregation
 function renderFills(list) {
   // Initialize the streaming aggregation with the batch
   initializeAggregation(list);
+
+  // Mark initial load as complete to prevent flashing
+  isInitialLoad = false;
 
   // Render the aggregated groups
   renderAggregatedFills();
@@ -1003,9 +1152,17 @@ async function refreshFills() {
   try {
     const data = await fetchJson(`${API_BASE}/fills?limit=40`);
     fillsCache = data.fills || [];
+
+    // Update hasMoreFills based on response
+    if (data.hasMore !== undefined) {
+      hasMoreFills = data.hasMore;
+    }
+
     renderFills(fillsCache);
   } catch (err) {
     console.error(err);
+    // Still update UI even on error
+    updateFillsUI();
   }
 }
 
@@ -1394,7 +1551,13 @@ async function loadMoreFills() {
 
   isLoadingMore = true;
   const loadMoreEl = document.getElementById('fills-load-more');
+  const loadBtn = document.getElementById('load-history-btn');
+
   if (loadMoreEl) loadMoreEl.style.display = 'flex';
+  if (loadBtn) {
+    loadBtn.classList.add('loading');
+    loadBtn.textContent = 'Loading';
+  }
 
   try {
     const beforeTime = fillsOldestTime || new Date().toISOString();
@@ -1413,24 +1576,21 @@ async function loadMoreFills() {
 
       // Re-render with all fills (aggregation will be applied)
       renderFills(fillsCache);
-      updateTimeRangeDisplay();
     } else {
       hasMoreFills = false;
     }
 
-    // Show "no more" message if we've reached the end
-    if (!hasMoreFills && loadMoreEl) {
-      loadMoreEl.innerHTML = '<span class="no-more-fills">No more fills to load</span>';
-      loadMoreEl.style.display = 'block';
-    }
+    // Update UI elements
+    updateFillsUI();
   } catch (err) {
     console.error('Load more fills error:', err);
     hasMoreFills = false;
+    updateFillsUI();
   } finally {
     isLoadingMore = false;
-    if (hasMoreFills) {
-      const loadMoreEl = document.getElementById('fills-load-more');
-      if (loadMoreEl) loadMoreEl.style.display = 'none';
+    if (loadMoreEl) loadMoreEl.style.display = 'none';
+    if (loadBtn) {
+      loadBtn.classList.remove('loading');
     }
   }
 }
@@ -1471,38 +1631,57 @@ function initLoadHistoryButton() {
   if (!btn) return;
 
   btn.addEventListener('click', async () => {
+    if (isLoadingMore) return;
+    isLoadingMore = true;
+
     btn.disabled = true;
+    btn.classList.add('loading');
     btn.textContent = 'Loading...';
 
-    // First, try to fetch historical fills from Hyperliquid API
-    const result = await fetchHistoricalFills();
+    try {
+      // Fetch historical fills from Hyperliquid API
+      const result = await fetchHistoricalFills();
 
-    if (result && result.fills && result.fills.length > 0) {
-      // Update cache with fetched fills
-      fillsCache = result.fills;
-      hasMoreFills = result.hasMore;
-      fillsOldestTime = result.oldestTime;
-      renderFills(fillsCache);
-      updateTimeRangeDisplay();
-      btn.textContent = `✓ Loaded ${result.inserted} fills`;
-    } else if (result && result.inserted === 0) {
-      // No new fills, but API call succeeded - try loading from DB
-      btn.textContent = 'Checking database...';
-      await loadMoreFills();
-      btn.textContent = 'No more fills';
-    } else {
-      // API call failed, fall back to DB
-      btn.textContent = 'Checking database...';
-      await loadMoreFills();
+      if (result && result.fills && result.fills.length > 0) {
+        // Update cache with fetched fills
+        fillsCache = result.fills;
+        hasMoreFills = result.hasMore !== false;
+        fillsOldestTime = result.oldestTime;
+        renderFills(fillsCache);
+
+        // Show success message
+        const newCount = result.inserted || 0;
+        if (newCount > 0) {
+          btn.textContent = `✓ ${newCount} new fills`;
+        } else {
+          btn.textContent = `✓ ${result.fills.length} fills loaded`;
+        }
+        btn.classList.remove('loading');
+
+        // Reset button text after delay
+        setTimeout(() => {
+          updateFillsUI();
+        }, 2000);
+      } else if (result) {
+        // API returned but no fills - maybe all caught up
+        hasMoreFills = false;
+        btn.textContent = 'No more fills';
+        btn.classList.remove('loading');
+        updateFillsUI();
+      } else {
+        // API call failed, try loading from local DB
+        btn.textContent = 'Retrying...';
+        btn.classList.remove('loading');
+        await loadMoreFills();
+      }
+    } catch (err) {
+      console.error('Load history button error:', err);
+      btn.textContent = 'Error - retry';
+      btn.classList.remove('loading');
+    } finally {
+      isLoadingMore = false;
+      btn.disabled = false;
     }
-
-    updateLoadHistoryVisibility();
-    btn.disabled = false;
-
-    // Reset button text after a delay
-    setTimeout(() => {
-      btn.textContent = '↓ Load More Fills';
-    }, 2000);
   });
 }
 
@@ -1513,6 +1692,10 @@ async function init() {
   initInfiniteScroll();
   initLoadHistoryButton();
   renderChart('BTCUSDT');
+
+  // Initialize fills UI with initial state
+  updateFillsUI();
+
   // Fetch initial prices
   fetchPrices();
   // Check positions status FIRST before loading data

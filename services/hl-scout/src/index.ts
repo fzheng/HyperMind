@@ -726,18 +726,22 @@ async function main() {
 
       logger.info('custom_account_added', { address: result.account?.address });
 
-      // Immediately fetch stats for the new custom account so it doesn't show all zeros
-      // Custom accounts are now properly scored using the same algorithm as system accounts
-      let stats = null;
-      if (leaderboardService && result.account?.address) {
-        try {
-          stats = await leaderboardService.fetchAndStoreCustomAccountStats(result.account.address, sanitizedNickname);
-        } catch (err: any) {
-          logger.error('custom_account_stats_fetch_failed', { address: result.account?.address, err: err?.message });
-        }
-      }
+      // Return immediately - don't block on stats fetch
+      res.status(201).json({ success: true, account: result.account });
 
-      res.status(201).json({ success: true, account: result.account, stats });
+      // Fetch stats in background (non-blocking) so UI doesn't timeout
+      // This also auto-fills nickname from API if user didn't provide one
+      if (leaderboardService && result.account?.address) {
+        leaderboardService.fetchAndStoreCustomAccountStats(result.account.address, sanitizedNickname)
+          .then(stats => {
+            if (stats) {
+              logger.info('custom_account_stats_fetched_background', { address: result.account?.address, remark: stats.remark });
+            }
+          })
+          .catch((err: any) => {
+            logger.error('custom_account_stats_fetch_failed', { address: result.account?.address, err: err?.message });
+          });
+      }
     } catch (err: any) {
       logger.error('custom_account_add_failed', { err: err?.message });
       res.status(500).json({ error: 'Failed to add custom account' });

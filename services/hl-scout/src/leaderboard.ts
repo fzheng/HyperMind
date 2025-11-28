@@ -24,12 +24,15 @@ import {
   DEFAULT_SCORING_PARAMS,
   removeCustomAccount,
   listCustomAccounts,
+  updateCustomAccountNickname,
   type ScoringParams
 } from '@hl/ts-lib';
 import type { CandidateEvent } from '@hl/ts-lib';
 
 /** Base URL for Hyperbot leaderboard API */
 const DEFAULT_API_URL = 'https://hyperbot.network/api/leaderboard/smart';
+/** Hyperbot address remarks batch API endpoint */
+const HYPERBOT_REMARKS_URL = 'https://hyperbot.network/api/leaderboard/smart/query-addr-remarks';
 /** Hyperliquid info API endpoint */
 const HYPERLIQUID_INFO_URL = 'https://api.hyperliquid.xyz/info';
 /** Maps window names to period days */
@@ -575,6 +578,55 @@ export class LeaderboardService {
       this.logger.warn('addr_stat_fetch_failed', { address: normalized, period, err: err?.message });
       return null;
     }
+  }
+
+  /**
+   * Fetch address remarks (nicknames) from Hyperbot batch API.
+   * Much faster than fetching the entire leaderboard.
+   *
+   * API: POST https://hyperbot.network/api/leaderboard/smart/query-addr-remarks
+   * Payload: ["0xaddress1", "0xaddress2", ...]
+   * Response: { code: 0, msg: "SUCCESS", data: [{ address: "0x...", remark: "nickname" }, ...] }
+   */
+  async fetchAddressRemarks(addresses: string[]): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    if (!addresses.length) return result;
+
+    const normalizedAddresses = addresses.map(a => normalizeAddress(a));
+
+    try {
+      const payload = await this.requestJson<{
+        code: number;
+        msg: string;
+        data?: Array<{ address: string; remark?: string | null }>;
+      }>(
+        HYPERBOT_REMARKS_URL,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(normalizedAddresses),
+        },
+        2,
+        8000
+      );
+
+      if (payload?.code === 0 && Array.isArray(payload.data)) {
+        for (const item of payload.data) {
+          if (item.remark && typeof item.remark === 'string' && item.remark.trim()) {
+            result.set(normalizeAddress(item.address), item.remark.trim());
+          }
+        }
+      }
+
+      this.logger.info('address_remarks_fetched', {
+        requested: addresses.length,
+        found: result.size,
+      });
+    } catch (err: any) {
+      this.logger.warn('address_remarks_fetch_failed', { err: err?.message });
+    }
+
+    return result;
   }
 
   private async fetchPortfolioSeriesBatch(
@@ -1207,25 +1259,21 @@ export class LeaderboardService {
     // Fetch stats from Hyperbot API
     const stats = await this.fetchAddressStat(normalized, period);
 
-    // Also try to find the account in the raw leaderboard API to get pnlList for proper scoring
-    let pnlList: Array<{ timestamp: number; value: string }> | undefined;
-    let rawWinRate = stats?.winRate ?? 0;
-    let rawExecutedOrders = (stats?.openPosCount ?? 0) + (stats?.closePosCount ?? 0);
-    let rawRealizedPnl = stats?.totalPnl ?? 0;
+    // Extract stats for scoring
+    const rawWinRate = stats?.winRate ?? 0;
+    const rawExecutedOrders = (stats?.openPosCount ?? 0) + (stats?.closePosCount ?? 0);
+    const rawRealizedPnl = stats?.totalPnl ?? 0;
 
+    // Fetch remark from Hyperbot batch API (much faster than fetching entire leaderboard)
+    let apiRemark: string | null = null;
     try {
-      // Fetch the raw leaderboard to find this address and get its pnlList
-      const raw = await this.fetchPeriod(period);
-      const found = raw.find(e => normalizeAddress(e.address) === normalized);
-      if (found) {
-        pnlList = found.pnlList;
-        rawWinRate = found.winRate ?? rawWinRate;
-        rawExecutedOrders = found.executedOrders ?? rawExecutedOrders;
-        rawRealizedPnl = found.realizedPnl ?? rawRealizedPnl;
-        this.logger.info('custom_account_found_in_leaderboard', { address: normalized });
+      const remarks = await this.fetchAddressRemarks([normalized]);
+      apiRemark = remarks.get(normalized) ?? null;
+      if (apiRemark) {
+        this.logger.info('custom_account_remark_fetched', { address: normalized, apiRemark });
       }
     } catch (err: any) {
-      this.logger.warn('custom_account_leaderboard_fetch_failed', { address: normalized, err: err?.message });
+      this.logger.warn('custom_account_remark_fetch_failed', { address: normalized, err: err?.message });
     }
 
     // Compute proper score using the scoring algorithm (same as system accounts)
@@ -1238,7 +1286,7 @@ export class LeaderboardService {
       numTrades: rawExecutedOrders,
       numWins,
       numLosses,
-      pnlList: pnlList?.map(p => parseFloat(p.value)) ?? [],
+      pnlList: [], // pnlList not available from stats API; stability score defaults to 0.5
     }, DEFAULT_SCORING_PARAMS, { computeFullScore: true });
 
     // Build the entry with computed score
@@ -1252,7 +1300,7 @@ export class LeaderboardService {
       realizedPnl: rawRealizedPnl,
       efficiency: rawRealizedPnl && rawExecutedOrders ? rawRealizedPnl / Math.max(1, rawExecutedOrders) : 0,
       pnlConsistency: scoringResult.details.stabilityScore,
-      remark: nickname ?? null,
+      remark: nickname ?? apiRemark ?? null, // Use user nickname, fallback to API remark
       labels: ['custom'],
       statOpenPositions: stats?.openPosCount ?? null,
       statClosedPositions: stats?.closePosCount ?? null,
@@ -1320,6 +1368,18 @@ export class LeaderboardService {
         ]
       );
       this.logger.info('custom_account_stats_stored', { address: normalized, period, stats });
+
+      // If we auto-fetched a nickname from the API and user didn't provide one,
+      // also update the hl_custom_accounts table so it persists
+      if (!nickname && apiRemark) {
+        try {
+          await updateCustomAccountNickname(normalized, apiRemark);
+          this.logger.info('custom_account_nickname_auto_filled', { address: normalized, nickname: apiRemark });
+        } catch (nickErr: any) {
+          this.logger.warn('custom_account_nickname_update_failed', { address: normalized, err: nickErr?.message });
+        }
+      }
+
       return entry;
     } catch (err: any) {
       this.logger.error('custom_account_stats_store_failed', { address: normalized, err: err?.message });

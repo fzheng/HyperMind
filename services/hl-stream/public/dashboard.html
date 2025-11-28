@@ -152,8 +152,12 @@
         </div>
         <div class="card fills-card">
           <div class="card-header">
-            <h3>Live Fills</h3>
+            <h3>
+              <span class="live-dot" title="Live"></span>
+              Live Fills
+            </h3>
             <div class="fills-meta">
+              <span id="fills-count" class="fills-count">0 fills</span>
               <span id="fills-time-range" class="time-range">—</span>
             </div>
           </div>
@@ -176,9 +180,13 @@
               <span class="load-more-spinner"></span>
               <span>Loading...</span>
             </div>
-            <div id="fills-load-history" class="load-history-btn-container">
-              <button id="load-history-btn" class="load-history-btn">↓ Load More Fills</button>
-            </div>
+          </div>
+          <div class="fills-status-bar" id="fills-status-bar">
+            <span class="fills-status-text" id="fills-status-text">
+              <span class="status-icon">📊</span>
+              <span id="fills-status-message">Waiting for fills...</span>
+            </span>
+            <button id="load-history-btn" class="load-history-btn">Load More</button>
           </div>
         </div>
       </section>
