@@ -3,7 +3,7 @@
 ## Quick Start
 
 ```bash
-npm test             # Run all 657 tests
+npm test             # Run all 681 tests
 ```
 
 That's it! One command runs the entire test suite.
@@ -19,7 +19,7 @@ npm test -- validation   # Run specific test file
 
 ## Test Coverage
 
-**Overall: 63%** | **ts-lib: 97%**
+**Overall: 76%** | **ts-lib: 97%**
 
 | Module | Coverage | Description |
 |--------|----------|-------------|
@@ -41,7 +41,7 @@ npm test -- validation   # Run specific test file
 | utils.test.ts | 93 | Utility functions |
 | hyperliquid.integration.test.ts | 35 | External API calls |
 | leaderboard.test.ts | 40 | Leaderboard scoring |
-| leaderboard.integration.test.ts | 49 | Cache, rate limiter |
+| leaderboard.integration.test.ts | 56 | Cache, rate limiter, API integration |
 | pagination.test.ts | 14 | Trade deduplication |
 | event-queue.test.ts | 15 | Event streaming |
 | fill-aggregation.test.ts | 20 | Fill grouping |

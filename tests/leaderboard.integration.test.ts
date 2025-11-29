@@ -666,3 +666,667 @@ describe('Concurrency Helpers', () => {
     expect(order).toEqual([1, 2, 3]); // Sequential order
   });
 });
+
+describe('LeaderboardService Lifecycle', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockFetch.mockReset();
+  });
+
+  it('should start and stop timer correctly', () => {
+    jest.useFakeTimers();
+
+    // Mock successful fetch
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [] }),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 10, selectCount: 5, periods: [30], refreshMs: 1000 },
+      mockPublish
+    );
+
+    service.start();
+
+    // Timer should be set
+    expect(service['timer']).not.toBeNull();
+
+    service.stop();
+
+    // Timer should be cleared
+    expect(service['timer']).toBeNull();
+
+    jest.useRealTimers();
+  });
+
+  it('should call refreshAll on start', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [] }),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 10, selectCount: 5, periods: [30], refreshMs: 60000 },
+      mockPublish
+    );
+
+    const refreshSpy = jest.spyOn(service, 'refreshAll');
+
+    service.start();
+
+    // Wait for async call
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(refreshSpy).toHaveBeenCalled();
+
+    service.stop();
+  });
+});
+
+describe('LeaderboardService fetchPeriod', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockFetch.mockReset();
+  });
+
+  it('should fetch multiple pages when needed', async () => {
+    const page1Data = Array(100).fill(null).map((_, i) => ({
+      address: `0x${i.toString().padStart(40, '0')}`,
+      winRate: 0.7,
+      executedOrders: 50,
+      realizedPnl: 10000,
+    }));
+
+    const page2Data = Array(50).fill(null).map((_, i) => ({
+      address: `0x${(i + 100).toString().padStart(40, '0')}`,
+      winRate: 0.65,
+      executedOrders: 40,
+      realizedPnl: 5000,
+    }));
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: page1Data }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ data: page2Data }),
+      });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 150, selectCount: 5, periods: [30], pageSize: 100 },
+      mockPublish
+    );
+
+    const result = await service['fetchPeriod'](30);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(result.length).toBe(150);
+  });
+
+  it('should stop fetching when page returns fewer entries than pageSize', async () => {
+    const partialPageData = Array(50).fill(null).map((_, i) => ({
+      address: `0x${i.toString().padStart(40, '0')}`,
+      winRate: 0.7,
+      executedOrders: 50,
+      realizedPnl: 10000,
+    }));
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: partialPageData }),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 200, selectCount: 5, periods: [30], pageSize: 100 },
+      mockPublish
+    );
+
+    const result = await service['fetchPeriod'](30);
+
+    // Should only fetch one page since 50 < 100
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(result.length).toBe(50);
+  });
+
+  it('should throw error on HTTP failure', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    await expect(service['fetchPeriod'](30)).rejects.toThrow('leaderboard HTTP 500');
+  });
+
+  it('should limit results to topN', async () => {
+    const largeData = Array(200).fill(null).map((_, i) => ({
+      address: `0x${i.toString().padStart(40, '0')}`,
+      winRate: 0.7,
+      executedOrders: 50,
+      realizedPnl: 10000,
+    }));
+
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: largeData }),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30], pageSize: 200 },
+      mockPublish
+    );
+
+    const result = await service['fetchPeriod'](30);
+
+    expect(result.length).toBe(100); // Limited to topN
+  });
+});
+
+describe('LeaderboardService fetchAddressStat', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockFetch.mockReset();
+    // Reset module cache to clear the internal cache
+    jest.resetModules();
+  });
+
+  it('should fetch and parse address stats', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        data: {
+          winRate: 0.75,
+          openPosCount: 3,
+          closePosCount: 50,
+          avgPosDuration: 3600,
+          totalPnl: 50000,
+          maxDrawdown: 0.15,
+        },
+      }),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const result = await service['fetchAddressStat']('0x1234', 30);
+
+    expect(result).toEqual({
+      winRate: 0.75,
+      openPosCount: 3,
+      closePosCount: 50,
+      avgPosDuration: 3600,
+      totalPnl: 50000,
+      maxDrawdown: 0.15,
+    });
+  });
+
+  it('should return null when data is missing', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: null }),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    // Use different address to avoid cache
+    const result = await service['fetchAddressStat']('0xnulldata', 30);
+
+    expect(result).toBeNull();
+  });
+
+  it('should return null on fetch error', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('Network error'));
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    // Use different address to avoid cache
+    const result = await service['fetchAddressStat']('0xerror', 30);
+
+    expect(result).toBeNull();
+  });
+
+  it('should use cache on second request', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        data: { winRate: 0.8, totalPnl: 10000 },
+      }),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    // First call - fetches from API (use unique address)
+    await service['fetchAddressStat']('0xcachetest', 30);
+    const fetchCount1 = mockFetch.mock.calls.length;
+
+    // Second call - should use cache
+    await service['fetchAddressStat']('0xcachetest', 30);
+    const fetchCount2 = mockFetch.mock.calls.length;
+
+    // Fetch count should not increase (cache hit)
+    expect(fetchCount2).toBe(fetchCount1);
+  });
+});
+
+describe('LeaderboardService fetchAddressRemarks', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockFetch.mockReset();
+  });
+
+  it('should fetch and map address remarks', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        code: 0,
+        msg: 'SUCCESS',
+        data: [
+          { address: '0xAAA', remark: 'Trader One' },
+          { address: '0xBBB', remark: 'Trader Two' },
+          { address: '0xCCC', remark: null },
+        ],
+      }),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const result = await service.fetchAddressRemarks(['0xAAA', '0xBBB', '0xCCC']);
+
+    expect(result.size).toBe(2);
+    expect(result.get('0xaaa')).toBe('Trader One');
+    expect(result.get('0xbbb')).toBe('Trader Two');
+    expect(result.has('0xccc')).toBe(false); // null remark not included
+  });
+
+  it('should return empty map for empty addresses', async () => {
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const result = await service.fetchAddressRemarks([]);
+
+    expect(result.size).toBe(0);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('should handle API error gracefully', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('API down'));
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const result = await service.fetchAddressRemarks(['0xAAA']);
+
+    expect(result.size).toBe(0); // Empty map on error
+  });
+
+  it('should handle non-zero response code', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        code: 1,
+        msg: 'ERROR',
+        data: null,
+      }),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const result = await service.fetchAddressRemarks(['0xAAA']);
+
+    expect(result.size).toBe(0);
+  });
+});
+
+describe('LeaderboardService fetchPortfolioSeries', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockFetch.mockReset();
+  });
+
+  it('should fetch and parse portfolio series', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve([
+        ['month', {
+          pnlHistory: [[1700000000000, '1000'], [1700100000000, '2000']],
+          accountValueHistory: [[1700000000000, '10000'], [1700100000000, '12000']],
+        }],
+        ['week', {
+          pnlHistory: [[1700000000000, '500']],
+          accountValueHistory: [[1700000000000, '10500']],
+        }],
+      ]),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const result = await service['fetchPortfolioSeries']('0x1234');
+
+    expect(result).toHaveLength(2);
+    expect(result[0].window).toBe('month');
+    expect(result[0].pnlHistory).toHaveLength(2);
+    expect(result[1].window).toBe('week');
+  });
+
+  it('should handle empty portfolio response', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve([]),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const result = await service['fetchPortfolioSeries']('0x1234');
+
+    expect(result).toEqual([]);
+  });
+
+  it('should return null on fetch error', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('Network error'));
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const result = await service['fetchPortfolioSeries']('0x1234');
+
+    expect(result).toBeNull();
+  });
+
+  it('should handle malformed portfolio data', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve([
+        ['invalid'], // Missing second element
+        [null, null], // Invalid structure
+      ]),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const result = await service['fetchPortfolioSeries']('0x1234');
+
+    expect(result).toEqual([]);
+  });
+});
+
+describe('LeaderboardService applyStatsToEntry', () => {
+  it('should apply stats to entry', () => {
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const entry = {
+      address: '0x1234',
+      rank: 1,
+      score: 100,
+      weight: 0.1,
+      winRate: 0.5,
+      executedOrders: 10,
+      realizedPnl: 1000,
+      efficiency: 100,
+      pnlConsistency: 0.8,
+      remark: null,
+      labels: [],
+      statOpenPositions: null,
+      statClosedPositions: null,
+      statAvgPosDuration: null,
+      statTotalPnl: null,
+      statMaxDrawdown: null,
+      meta: {},
+    };
+
+    const stats = {
+      winRate: 0.75,
+      openPosCount: 3,
+      closePosCount: 50,
+      avgPosDuration: 7200,
+      totalPnl: 25000,
+      maxDrawdown: 0.1,
+    };
+
+    service['applyStatsToEntry'](entry, stats);
+
+    expect(entry.winRate).toBe(0.75);
+    expect(entry.statOpenPositions).toBe(3);
+    expect(entry.statClosedPositions).toBe(50);
+    expect(entry.statAvgPosDuration).toBe(7200);
+    expect(entry.statTotalPnl).toBe(25000);
+    expect(entry.statMaxDrawdown).toBe(0.1);
+    expect(entry.meta.stats).toEqual(stats);
+  });
+
+  it('should clamp win rate to [0, 1]', () => {
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const entry = {
+      address: '0x1234',
+      rank: 1,
+      score: 100,
+      weight: 0.1,
+      winRate: 0.5,
+      executedOrders: 10,
+      realizedPnl: 1000,
+      efficiency: 100,
+      pnlConsistency: 0.8,
+      remark: null,
+      labels: [],
+      statOpenPositions: null,
+      statClosedPositions: null,
+      statAvgPosDuration: null,
+      statTotalPnl: null,
+      statMaxDrawdown: null,
+      meta: {},
+    };
+
+    // Test with value > 1
+    service['applyStatsToEntry'](entry, { winRate: 1.5 });
+    expect(entry.winRate).toBe(1);
+
+    // Test with value < 0
+    service['applyStatsToEntry'](entry, { winRate: -0.5 });
+    expect(entry.winRate).toBe(0);
+  });
+
+  it('should handle missing stats fields', () => {
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const entry = {
+      address: '0x1234',
+      rank: 1,
+      score: 100,
+      weight: 0.1,
+      winRate: 0.5,
+      executedOrders: 10,
+      realizedPnl: 1000,
+      efficiency: 100,
+      pnlConsistency: 0.8,
+      remark: null,
+      labels: [],
+      statOpenPositions: 5,
+      statClosedPositions: 10,
+      statAvgPosDuration: 3600,
+      statTotalPnl: 5000,
+      statMaxDrawdown: 0.05,
+      meta: {},
+    };
+
+    service['applyStatsToEntry'](entry, {}); // Empty stats
+
+    // Original values should be preserved
+    expect(entry.winRate).toBe(0.5);
+    expect(entry.statOpenPositions).toBe(5);
+  });
+});
+
+describe('LeaderboardService refreshPeriod', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockFetch.mockReset();
+    mockQuery.mockReset();
+  });
+
+  it('should skip persistence when upstream returns empty data', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [] }),
+    });
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    await service.refreshPeriod(30);
+
+    // Should not publish when data is empty
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
+  it('should handle errors in refreshPeriod gracefully', async () => {
+    mockFetch.mockRejectedValue(new Error('API failure'));
+
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    // Should not throw, error is caught and logged
+    await expect(service.refreshPeriod(30)).rejects.toThrow();
+  });
+});
+
+describe('LeaderboardService publishTopCandidates', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockFetch.mockReset();
+    jest.resetModules();
+  });
+
+  it('should publish candidates with correct format', async () => {
+    const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
+    const mockPublish = jest.fn().mockResolvedValue(undefined);
+    const service = new LeaderboardService(
+      { topN: 100, selectCount: 5, periods: [30] },
+      mockPublish
+    );
+
+    const candidates = [
+      {
+        address: '0x1234',
+        rank: 1,
+        score: 100,
+        weight: 0.5,
+        winRate: 0.8,
+        executedOrders: 50,
+        realizedPnl: 10000,
+      },
+      {
+        address: '0x5678',
+        rank: 2,
+        score: 80,
+        weight: 0.3,
+        winRate: 0.75,
+        executedOrders: 40,
+        realizedPnl: 8000,
+      },
+    ];
+
+    await service['publishTopCandidates'](30, candidates);
+
+    expect(mockPublish).toHaveBeenCalledTimes(2);
+    // Check that first call contains the address
+    expect(mockPublish.mock.calls[0][0].address).toBe('0x1234');
+  });
+});
