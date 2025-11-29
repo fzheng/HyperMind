@@ -3,7 +3,7 @@
 ## Quick Start
 
 ```bash
-npm test             # Run all 548 tests
+npm test             # Run all 623 tests
 ```
 
 That's it! One command runs the entire test suite.
@@ -45,6 +45,7 @@ npm test -- validation   # Run specific test file
 | fill-aggregation.test.ts | 20 | Fill grouping |
 | streaming-aggregation.test.ts | 25 | Real-time aggregation |
 | position-chain.test.ts | 40+ | Position chain validation |
+| dashboard.test.ts | 75 | UI formatting and aggregation |
 
 ## Writing Tests
 
