@@ -506,13 +506,22 @@ main {
   color: var(--negative);
 }
 
-/* Pinned row highlight */
+/* Pinned row highlight - more visible background */
 .leaderboard-table tr.pinned-row {
-  background: rgba(245, 158, 11, 0.03);
+  background: rgba(245, 158, 11, 0.12);
 }
 
 .leaderboard-table tr.pinned-row:hover {
-  background: rgba(245, 158, 11, 0.06);
+  background: rgba(245, 158, 11, 0.18);
+}
+
+/* Light theme - slightly darker for visibility */
+[data-theme="light"] .leaderboard-table tr.pinned-row {
+  background: rgba(245, 158, 11, 0.15);
+}
+
+[data-theme="light"] .leaderboard-table tr.pinned-row:hover {
+  background: rgba(245, 158, 11, 0.22);
 }
 
 /* Address cell with pin icon */
