@@ -3,7 +3,7 @@ import { clearinghouseState as infoClearinghouse } from '@nktkas/hyperliquid/api
 import { clearinghouseState as subClearinghouse, userEvents as subUserEvents } from '@nktkas/hyperliquid/api/subscription';
 import { getCurrentBtcPrice } from './price';
 import { EventQueue, type ChangeEvent } from './queue';
-import { insertEvent, upsertCurrentPosition, insertTradeIfNew, clearPositionsForAddress } from './persist';
+import { insertEvent, upsertCurrentPosition, insertTradeIfNew } from './persist';
 
 type Address = string;
 
@@ -144,11 +144,9 @@ export class RealtimeTracker {
     const user = addr as `0x${string}`;
     const subs: { ch?: any; ue?: any; ueTransport?: any } = {};
 
-    // Clear any stale position data for this address before subscribing
-    // This ensures we start fresh with the current state from Hyperliquid
-    await clearPositionsForAddress(addr).catch((err) =>
-      console.error('[realtime] clearPositionsForAddress failed:', err)
-    );
+    // NOTE: We no longer clear positions here to avoid race conditions where
+    // the dashboard queries positions between clear and prime.
+    // Positions are updated incrementally via WebSocket or during leaderboard refresh.
 
     // clearinghouseState: position snapshots and updates
     try {
