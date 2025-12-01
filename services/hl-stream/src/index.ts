@@ -580,6 +580,11 @@ async function main() {
 
   // Backfill fills endpoint for infinite scroll
   app.get('/dashboard/api/fills/backfill', async (req, res) => {
+    // Prevent browser caching - each request may return different data
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+
     try {
       const beforeTime = req.query.before ? String(req.query.before) : null;
       const limit = req.query.limit ? Math.min(100, Math.max(1, parseInt(String(req.query.limit), 10))) : 30;

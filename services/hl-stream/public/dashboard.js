@@ -1836,17 +1836,27 @@ async function loadMoreFills() {
     const data = await fetchJson(url);
 
     if (data.fills && data.fills.length > 0) {
-      // Append to cache
-      fillsCache = [...fillsCache, ...data.fills];
-      hasMoreFills = data.hasMore;
+      // Check for duplicates by comparing fill IDs
+      const existingIds = new Set(fillsCache.map(f => f.id));
+      const newFills = data.fills.filter(f => !existingIds.has(f.id));
 
-      // Update oldest time
-      if (data.oldestTime) {
-        fillsOldestTime = data.oldestTime;
+      if (newFills.length === 0) {
+        // All fills are duplicates - we've reached the end
+        hasMoreFills = false;
+      } else {
+        // Append only new fills to cache
+        fillsCache = [...fillsCache, ...newFills];
+        hasMoreFills = data.hasMore;
+
+        // Update oldest time from the actual oldest new fill
+        const oldestNewFill = newFills[newFills.length - 1];
+        if (oldestNewFill && oldestNewFill.time_utc) {
+          fillsOldestTime = oldestNewFill.time_utc;
+        }
+
+        // Re-render with all fills (aggregation will be applied)
+        renderFills(fillsCache);
       }
-
-      // Re-render with all fills (aggregation will be applied)
-      renderFills(fillsCache);
     } else {
       hasMoreFills = false;
     }

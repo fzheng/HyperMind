@@ -734,31 +734,47 @@ main {
 
 @media (min-width: 1025px) {
   .grid-bottom {
-    grid-template-columns: 1fr 1fr;
-    /* Force both columns to same height */
-    align-items: stretch;
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
   }
 
-  /* Both cards must expand to fill grid cell */
-  .grid-bottom .leaderboard-card,
-  .grid-bottom .fills-card {
+  /* Leaderboard card: sticky on left side */
+  .grid-bottom .leaderboard-card {
+    position: sticky;
+    top: 16px;
+    flex: 0 0 auto;
+    width: 45%;
+    max-width: 600px;
+    min-width: 400px;
+    max-height: calc(100vh - 32px);
     display: flex;
     flex-direction: column;
-    min-height: 0;
-    height: 100%;
+    overflow: hidden;
   }
 
-  /* Leaderboard table container fills space */
+  /* Leaderboard table container scrolls if too tall */
   .grid-bottom .leaderboard-table-container {
     flex: 1;
-    overflow: visible;
+    overflow-y: auto;
+    min-height: 0;
   }
 
-  /* Fills scroll container fills remaining space */
+  /* Fills card: takes remaining space, scrolls naturally with page */
+  .grid-bottom .fills-card {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Fills scroll container - auto height, no internal scroll needed */
   .grid-bottom .fills-scroll-container {
     flex: 1;
     min-height: 0;
-    overflow-y: auto;
+    /* Remove internal scroll - let page scroll naturally */
+    overflow-y: visible;
+    max-height: none;
   }
 }
 
