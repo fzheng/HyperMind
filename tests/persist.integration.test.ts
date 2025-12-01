@@ -1343,3 +1343,132 @@ describe('Position chain validation and repair', () => {
     });
   });
 });
+
+describe('addCustomPinnedAccount transaction lock path', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockClientQuery.mockReset();
+  });
+
+  it('should execute SQL sequence: BEGIN → LOCK → COUNT → INSERT → COMMIT on success', async () => {
+    // Setup successful transaction flow
+    mockClientQuery
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({}) // LOCK TABLE
+      .mockResolvedValueOnce({ rows: [{ cnt: 0 }] }) // COUNT custom accounts
+      .mockResolvedValueOnce({ rows: [] }) // CHECK EXISTING
+      .mockResolvedValueOnce({
+        rows: [{ id: 1, address: '0xnewaddr', is_custom: true, pinned_at: '2025-01-01' }],
+      }) // INSERT
+      .mockResolvedValueOnce({}); // COMMIT
+
+    const result = await addCustomPinnedAccount('0xNEWADDR');
+
+    expect(result.success).toBe(true);
+
+    // Verify SQL sequence
+    expect(mockClientQuery).toHaveBeenNthCalledWith(1, 'BEGIN');
+    expect(mockClientQuery).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('LOCK TABLE hl_pinned_accounts')
+    );
+    expect(mockClientQuery).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining('SELECT COUNT')
+    );
+    expect(mockClientQuery).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining('SELECT 1 FROM hl_pinned_accounts'),
+      ['0xnewaddr']
+    );
+    expect(mockClientQuery).toHaveBeenNthCalledWith(
+      5,
+      expect.stringContaining('INSERT INTO hl_pinned_accounts'),
+      ['0xnewaddr']
+    );
+    expect(mockClientQuery).toHaveBeenNthCalledWith(6, 'COMMIT');
+  });
+
+  it('should execute SQL sequence: BEGIN → LOCK → COUNT → ROLLBACK on limit exceeded', async () => {
+    mockClientQuery
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({}) // LOCK TABLE
+      .mockResolvedValueOnce({ rows: [{ cnt: 3 }] }) // COUNT = 3 (limit reached)
+      .mockResolvedValueOnce({}); // ROLLBACK
+
+    const result = await addCustomPinnedAccount('0xnewaddr');
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Maximum');
+
+    // Verify SQL sequence - should rollback without insert
+    expect(mockClientQuery).toHaveBeenNthCalledWith(1, 'BEGIN');
+    expect(mockClientQuery).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('LOCK TABLE hl_pinned_accounts')
+    );
+    expect(mockClientQuery).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining('SELECT COUNT')
+    );
+    expect(mockClientQuery).toHaveBeenNthCalledWith(4, 'ROLLBACK');
+  });
+
+  it('should execute SQL sequence: BEGIN → LOCK → COUNT → CHECK → ROLLBACK on duplicate', async () => {
+    mockClientQuery
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({}) // LOCK TABLE
+      .mockResolvedValueOnce({ rows: [{ cnt: 1 }] }) // COUNT = 1 (under limit)
+      .mockResolvedValueOnce({ rows: [{ is_custom: true }] }) // EXISTING found
+      .mockResolvedValueOnce({}); // ROLLBACK
+
+    const result = await addCustomPinnedAccount('0xexistingaddr');
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('already pinned');
+
+    // Verify rollback after finding existing
+    expect(mockClientQuery).toHaveBeenCalledWith('ROLLBACK');
+  });
+
+  it('should rollback on COUNT query failure', async () => {
+    mockClientQuery
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({}) // LOCK TABLE
+      .mockRejectedValueOnce(new Error('DB connection lost')) // COUNT fails
+      .mockResolvedValueOnce({}); // ROLLBACK
+
+    const result = await addCustomPinnedAccount('0xnewaddr');
+
+    expect(result.success).toBe(false);
+    expect(mockClientQuery).toHaveBeenCalledWith('ROLLBACK');
+  });
+
+  it('should rollback on INSERT failure', async () => {
+    mockClientQuery
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({}) // LOCK TABLE
+      .mockResolvedValueOnce({ rows: [{ cnt: 0 }] }) // COUNT
+      .mockResolvedValueOnce({ rows: [] }) // CHECK EXISTING
+      .mockRejectedValueOnce(new Error('Constraint violation')) // INSERT fails
+      .mockResolvedValueOnce({}); // ROLLBACK
+
+    const result = await addCustomPinnedAccount('0xnewaddr');
+
+    expect(result.success).toBe(false);
+    expect(mockClientQuery).toHaveBeenCalledWith('ROLLBACK');
+  });
+
+  it('should always release client after transaction', async () => {
+    // Even on failure, client should be released
+    // Mock the ROLLBACK to also return a promise for .catch() chain
+    mockClientQuery
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockRejectedValueOnce(new Error('Lock timeout')) // LOCK fails
+      .mockResolvedValueOnce({}); // ROLLBACK
+
+    await addCustomPinnedAccount('0xnewaddr');
+
+    expect(mockClient.release).toHaveBeenCalled();
+  });
+});

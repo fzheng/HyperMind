@@ -1263,6 +1263,18 @@ td {
   cursor: pointer;
 }
 
+/* Clickable time header toggle */
+.clickable-header {
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.clickable-header:hover {
+  color: var(--accent-primary);
+  background: var(--bg-card-hover);
+}
+
 .leaderboard-table th,
 .leaderboard-table td {
   overflow: hidden;

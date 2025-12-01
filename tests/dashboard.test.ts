@@ -728,6 +728,350 @@ describe('Time Formatting', () => {
       expect(result.length).toBeGreaterThan(0);
     });
   });
+
+  describe('fmtRelativeTime', () => {
+    /**
+     * Format timestamp as relative time (e.g., "3 mins ago", "2 hours ago")
+     * Extracted from dashboard.js for testing
+     */
+    function fmtRelativeTime(ts: string): string {
+      const now = Date.now();
+      const then = new Date(ts).getTime();
+      const diffMs = now - then;
+
+      if (diffMs < 0) return 'just now';
+
+      const seconds = Math.floor(diffMs / 1000);
+      const minutes = Math.floor(seconds / 60);
+      const hours = Math.floor(minutes / 60);
+      const days = Math.floor(hours / 24);
+
+      if (seconds < 60) return 'just now';
+      if (minutes === 1) return '1 min ago';
+      if (minutes < 60) return `${minutes} mins ago`;
+      if (hours === 1) return '1 hour ago';
+      if (hours < 24) return `${hours} hours ago`;
+      if (days === 1) return '1 day ago';
+      return `${days} days ago`;
+    }
+
+    it('should return "just now" for timestamps in the future', () => {
+      const futureTs = new Date(Date.now() + 60000).toISOString();
+      expect(fmtRelativeTime(futureTs)).toBe('just now');
+    });
+
+    it('should return "just now" for timestamps less than 60 seconds ago', () => {
+      const recentTs = new Date(Date.now() - 30000).toISOString(); // 30 seconds ago
+      expect(fmtRelativeTime(recentTs)).toBe('just now');
+    });
+
+    it('should return "just now" for timestamps exactly 59 seconds ago', () => {
+      const ts = new Date(Date.now() - 59000).toISOString();
+      expect(fmtRelativeTime(ts)).toBe('just now');
+    });
+
+    it('should return "1 min ago" for timestamps exactly 1 minute ago', () => {
+      const ts = new Date(Date.now() - 60000).toISOString();
+      expect(fmtRelativeTime(ts)).toBe('1 min ago');
+    });
+
+    it('should return "X mins ago" for timestamps 2-59 minutes ago', () => {
+      const ts2min = new Date(Date.now() - 2 * 60000).toISOString();
+      expect(fmtRelativeTime(ts2min)).toBe('2 mins ago');
+
+      const ts30min = new Date(Date.now() - 30 * 60000).toISOString();
+      expect(fmtRelativeTime(ts30min)).toBe('30 mins ago');
+
+      const ts59min = new Date(Date.now() - 59 * 60000).toISOString();
+      expect(fmtRelativeTime(ts59min)).toBe('59 mins ago');
+    });
+
+    it('should return "1 hour ago" for timestamps exactly 1 hour ago', () => {
+      const ts = new Date(Date.now() - 60 * 60000).toISOString();
+      expect(fmtRelativeTime(ts)).toBe('1 hour ago');
+    });
+
+    it('should return "X hours ago" for timestamps 2-23 hours ago', () => {
+      const ts2hr = new Date(Date.now() - 2 * 60 * 60000).toISOString();
+      expect(fmtRelativeTime(ts2hr)).toBe('2 hours ago');
+
+      const ts12hr = new Date(Date.now() - 12 * 60 * 60000).toISOString();
+      expect(fmtRelativeTime(ts12hr)).toBe('12 hours ago');
+
+      const ts23hr = new Date(Date.now() - 23 * 60 * 60000).toISOString();
+      expect(fmtRelativeTime(ts23hr)).toBe('23 hours ago');
+    });
+
+    it('should return "1 day ago" for timestamps exactly 24 hours ago', () => {
+      const ts = new Date(Date.now() - 24 * 60 * 60000).toISOString();
+      expect(fmtRelativeTime(ts)).toBe('1 day ago');
+    });
+
+    it('should return "X days ago" for timestamps more than 1 day ago', () => {
+      const ts2day = new Date(Date.now() - 2 * 24 * 60 * 60000).toISOString();
+      expect(fmtRelativeTime(ts2day)).toBe('2 days ago');
+
+      const ts7day = new Date(Date.now() - 7 * 24 * 60 * 60000).toISOString();
+      expect(fmtRelativeTime(ts7day)).toBe('7 days ago');
+
+      const ts30day = new Date(Date.now() - 30 * 24 * 60 * 60000).toISOString();
+      expect(fmtRelativeTime(ts30day)).toBe('30 days ago');
+    });
+
+    it('should handle edge case at minute boundary', () => {
+      // At exactly 60 seconds, should show "1 min ago" not "just now"
+      const ts = new Date(Date.now() - 60 * 1000).toISOString();
+      expect(fmtRelativeTime(ts)).toBe('1 min ago');
+    });
+
+    it('should handle edge case at hour boundary', () => {
+      // At exactly 60 minutes, should show "1 hour ago" not "60 mins ago"
+      const ts = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      expect(fmtRelativeTime(ts)).toBe('1 hour ago');
+    });
+
+    it('should handle edge case at day boundary', () => {
+      // At exactly 24 hours, should show "1 day ago" not "24 hours ago"
+      const ts = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      expect(fmtRelativeTime(ts)).toBe('1 day ago');
+    });
+  });
+
+  describe('fmtFillTime', () => {
+    /**
+     * Format fill time based on display mode
+     * Simplified version for testing (actual implementation uses module state)
+     */
+    function fmtRelativeTime(ts: string): string {
+      const now = Date.now();
+      const then = new Date(ts).getTime();
+      const diffMs = now - then;
+
+      if (diffMs < 0) return 'just now';
+
+      const seconds = Math.floor(diffMs / 1000);
+      const minutes = Math.floor(seconds / 60);
+      const hours = Math.floor(minutes / 60);
+      const days = Math.floor(hours / 24);
+
+      if (seconds < 60) return 'just now';
+      if (minutes === 1) return '1 min ago';
+      if (minutes < 60) return `${minutes} mins ago`;
+      if (hours === 1) return '1 hour ago';
+      if (hours < 24) return `${hours} hours ago`;
+      if (days === 1) return '1 day ago';
+      return `${days} days ago`;
+    }
+
+    function fmtDateTime(ts: string): string {
+      return new Date(ts).toLocaleString([], {
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+    }
+
+    function fmtFillTime(ts: string, mode: 'absolute' | 'relative'): string {
+      if (mode === 'relative') {
+        return fmtRelativeTime(ts);
+      }
+      return fmtDateTime(ts);
+    }
+
+    it('should return relative time in relative mode', () => {
+      const ts = new Date(Date.now() - 5 * 60000).toISOString(); // 5 minutes ago
+      expect(fmtFillTime(ts, 'relative')).toBe('5 mins ago');
+    });
+
+    it('should return absolute datetime in absolute mode', () => {
+      const ts = '2025-01-15T10:30:45Z';
+      const result = fmtFillTime(ts, 'absolute');
+      // Verify it's a formatted datetime string (locale-dependent)
+      expect(typeof result).toBe('string');
+      expect(result.length).toBeGreaterThan(10); // datetime strings are longer than relative
+    });
+
+    it('should switch output format based on mode', () => {
+      const ts = new Date(Date.now() - 3 * 60000).toISOString(); // 3 minutes ago
+      const relativeResult = fmtFillTime(ts, 'relative');
+      const absoluteResult = fmtFillTime(ts, 'absolute');
+
+      expect(relativeResult).toBe('3 mins ago');
+      expect(absoluteResult).not.toBe('3 mins ago');
+      expect(absoluteResult.length).toBeGreaterThan(relativeResult.length);
+    });
+  });
+});
+
+describe('Time Display Mode Toggle', () => {
+  /**
+   * Tests for the time display mode toggle functionality
+   * This simulates the state management from dashboard.js
+   */
+
+  interface TimeToggleState {
+    mode: 'absolute' | 'relative';
+    headerText: string;
+    headerTitle: string;
+  }
+
+  function toggleTimeDisplayMode(currentState: TimeToggleState): TimeToggleState {
+    const newMode = currentState.mode === 'absolute' ? 'relative' : 'absolute';
+    return {
+      mode: newMode,
+      headerText: newMode === 'absolute' ? 'Time ⏱' : 'Time 🕐',
+      headerTitle:
+        newMode === 'absolute'
+          ? 'Click to show relative time (e.g., "3 mins ago")'
+          : 'Click to show absolute time',
+    };
+  }
+
+  it('should toggle from absolute to relative mode', () => {
+    const initialState: TimeToggleState = {
+      mode: 'absolute',
+      headerText: 'Time ⏱',
+      headerTitle: 'Click to show relative time (e.g., "3 mins ago")',
+    };
+
+    const newState = toggleTimeDisplayMode(initialState);
+
+    expect(newState.mode).toBe('relative');
+    expect(newState.headerText).toBe('Time 🕐');
+    expect(newState.headerTitle).toBe('Click to show absolute time');
+  });
+
+  it('should toggle from relative to absolute mode', () => {
+    const initialState: TimeToggleState = {
+      mode: 'relative',
+      headerText: 'Time 🕐',
+      headerTitle: 'Click to show absolute time',
+    };
+
+    const newState = toggleTimeDisplayMode(initialState);
+
+    expect(newState.mode).toBe('absolute');
+    expect(newState.headerText).toBe('Time ⏱');
+    expect(newState.headerTitle).toBe('Click to show relative time (e.g., "3 mins ago")');
+  });
+
+  it('should toggle back and forth correctly', () => {
+    let state: TimeToggleState = {
+      mode: 'absolute',
+      headerText: 'Time ⏱',
+      headerTitle: 'Click to show relative time (e.g., "3 mins ago")',
+    };
+
+    // Toggle to relative
+    state = toggleTimeDisplayMode(state);
+    expect(state.mode).toBe('relative');
+
+    // Toggle back to absolute
+    state = toggleTimeDisplayMode(state);
+    expect(state.mode).toBe('absolute');
+
+    // Toggle again to relative
+    state = toggleTimeDisplayMode(state);
+    expect(state.mode).toBe('relative');
+  });
+
+  it('should have correct header icon for each mode', () => {
+    const absoluteState: TimeToggleState = {
+      mode: 'absolute',
+      headerText: 'Time ⏱',
+      headerTitle: 'Click to show relative time (e.g., "3 mins ago")',
+    };
+
+    const relativeState = toggleTimeDisplayMode(absoluteState);
+
+    // Absolute mode uses stopwatch icon ⏱
+    expect(absoluteState.headerText).toContain('⏱');
+    expect(absoluteState.headerText).not.toContain('🕐');
+
+    // Relative mode uses clock icon 🕐
+    expect(relativeState.headerText).toContain('🕐');
+    expect(relativeState.headerText).not.toContain('⏱');
+  });
+});
+
+describe('Relative Time Auto-Refresh', () => {
+  /**
+   * Tests for the relative time auto-refresh interval management
+   * These test the logic for starting/stopping the refresh interval
+   */
+
+  interface RefreshState {
+    intervalId: number | null;
+    isRunning: boolean;
+  }
+
+  function startRelativeTimeRefresh(state: RefreshState): RefreshState {
+    if (state.intervalId !== null) return state; // Already running
+    return {
+      intervalId: 1, // Mock interval ID
+      isRunning: true,
+    };
+  }
+
+  function stopRelativeTimeRefresh(state: RefreshState): RefreshState {
+    if (state.intervalId === null) return state; // Not running
+    return {
+      intervalId: null,
+      isRunning: false,
+    };
+  }
+
+  it('should start refresh interval when not running', () => {
+    const initialState: RefreshState = { intervalId: null, isRunning: false };
+    const newState = startRelativeTimeRefresh(initialState);
+
+    expect(newState.isRunning).toBe(true);
+    expect(newState.intervalId).not.toBe(null);
+  });
+
+  it('should not start duplicate interval if already running', () => {
+    const runningState: RefreshState = { intervalId: 1, isRunning: true };
+    const newState = startRelativeTimeRefresh(runningState);
+
+    // Should return the same state (no change)
+    expect(newState).toBe(runningState);
+    expect(newState.intervalId).toBe(1);
+  });
+
+  it('should stop refresh interval when running', () => {
+    const runningState: RefreshState = { intervalId: 1, isRunning: true };
+    const newState = stopRelativeTimeRefresh(runningState);
+
+    expect(newState.isRunning).toBe(false);
+    expect(newState.intervalId).toBe(null);
+  });
+
+  it('should not error when stopping already stopped interval', () => {
+    const stoppedState: RefreshState = { intervalId: null, isRunning: false };
+    const newState = stopRelativeTimeRefresh(stoppedState);
+
+    expect(newState).toBe(stoppedState);
+    expect(newState.intervalId).toBe(null);
+  });
+
+  it('should correctly manage start/stop cycle', () => {
+    let state: RefreshState = { intervalId: null, isRunning: false };
+
+    // Start
+    state = startRelativeTimeRefresh(state);
+    expect(state.isRunning).toBe(true);
+
+    // Stop
+    state = stopRelativeTimeRefresh(state);
+    expect(state.isRunning).toBe(false);
+
+    // Start again
+    state = startRelativeTimeRefresh(state);
+    expect(state.isRunning).toBe(true);
+  });
 });
 
 describe('Score Formatting', () => {
@@ -842,5 +1186,191 @@ describe('Holdings Normalization', () => {
   it('should handle empty input', () => {
     expect(normalizeHoldings({})).toEqual({});
     expect(normalizeHoldings()).toEqual({});
+  });
+});
+
+describe('Dashboard API Limit Clamping', () => {
+  describe('/dashboard/fills limit', () => {
+    const clampFillsLimit = (input: unknown) =>
+      Math.max(1, Math.min(200, Number(input) || 25));
+
+    it('should default to 25 for undefined', () => {
+      expect(clampFillsLimit(undefined)).toBe(25);
+    });
+
+    it('should default to 25 for zero (falsy)', () => {
+      expect(clampFillsLimit(0)).toBe(25);
+    });
+
+    it('should clamp negative to 1', () => {
+      expect(clampFillsLimit(-10)).toBe(1);
+    });
+
+    it('should clamp values over 200 to 200', () => {
+      expect(clampFillsLimit(500)).toBe(200);
+    });
+
+    it('should pass through valid values', () => {
+      expect(clampFillsLimit(100)).toBe(100);
+    });
+  });
+
+  describe('/leaderboard limit', () => {
+    const clampLeaderboardLimit = (input: unknown) =>
+      Math.max(1, Math.min(1000, Number(input) || 100));
+
+    it('should default to 100 for undefined', () => {
+      expect(clampLeaderboardLimit(undefined)).toBe(100);
+    });
+
+    it('should default to 100 for zero (falsy)', () => {
+      expect(clampLeaderboardLimit(0)).toBe(100);
+    });
+
+    it('should clamp negative to 1', () => {
+      expect(clampLeaderboardLimit(-1)).toBe(1);
+    });
+
+    it('should clamp values over 1000 to 1000', () => {
+      expect(clampLeaderboardLimit(5000)).toBe(1000);
+    });
+
+    it('should pass through valid values', () => {
+      expect(clampLeaderboardLimit(500)).toBe(500);
+    });
+  });
+
+  describe('/leaderboard/selected limit', () => {
+    const clampSelectedLimit = (input: unknown) =>
+      Math.max(1, Math.min(50, Number(input) || 12));
+
+    it('should default to 12 for undefined', () => {
+      expect(clampSelectedLimit(undefined)).toBe(12);
+    });
+
+    it('should default to 12 for zero (falsy)', () => {
+      expect(clampSelectedLimit(0)).toBe(12);
+    });
+
+    it('should clamp values over 50 to 50', () => {
+      expect(clampSelectedLimit(100)).toBe(50);
+    });
+
+    it('should pass through valid values', () => {
+      expect(clampSelectedLimit(25)).toBe(25);
+    });
+  });
+
+  describe('Price API Symbol Handling', () => {
+    const getSymbol = (querySymbol: unknown) =>
+      querySymbol === 'ETHUSDT' ? 'ETH' : 'BTC';
+
+    it('should default to BTC for undefined', () => {
+      expect(getSymbol(undefined)).toBe('BTC');
+    });
+
+    it('should default to BTC for null', () => {
+      expect(getSymbol(null)).toBe('BTC');
+    });
+
+    it('should default to BTC for BTCUSDT', () => {
+      expect(getSymbol('BTCUSDT')).toBe('BTC');
+    });
+
+    it('should return ETH for ETHUSDT', () => {
+      expect(getSymbol('ETHUSDT')).toBe('ETH');
+    });
+
+    it('should default to BTC for unknown symbols', () => {
+      expect(getSymbol('random')).toBe('BTC');
+    });
+  });
+});
+
+describe('/dashboard/price endpoint behavior', () => {
+  /**
+   * Simulates the price endpoint handler
+   */
+  interface PriceResponse {
+    symbol: string;
+    price: number;
+    timestamp: string;
+  }
+
+  interface ErrorResponse {
+    error: string;
+  }
+
+  async function mockFetchPrice(
+    symbol: string,
+    upstreamFetcher: () => Promise<number | null>
+  ): Promise<{ status: number; body: PriceResponse | ErrorResponse }> {
+    try {
+      const price = await upstreamFetcher();
+
+      if (price === null) {
+        return {
+          status: 502,
+          body: { error: 'Failed to fetch price from upstream' },
+        };
+      }
+
+      return {
+        status: 200,
+        body: {
+          symbol,
+          price,
+          timestamp: new Date().toISOString(),
+        },
+      };
+    } catch (err) {
+      return {
+        status: 502,
+        body: { error: 'Failed to fetch price from upstream' },
+      };
+    }
+  }
+
+  it('returns BTC price successfully', async () => {
+    const result = await mockFetchPrice('BTC', async () => 95000);
+
+    expect(result.status).toBe(200);
+    expect((result.body as PriceResponse).symbol).toBe('BTC');
+    expect((result.body as PriceResponse).price).toBe(95000);
+  });
+
+  it('returns ETH price when symbol=ETHUSDT', async () => {
+    const result = await mockFetchPrice('ETH', async () => 3500);
+
+    expect(result.status).toBe(200);
+    expect((result.body as PriceResponse).symbol).toBe('ETH');
+    expect((result.body as PriceResponse).price).toBe(3500);
+  });
+
+  it('returns 502 when upstream returns null', async () => {
+    const result = await mockFetchPrice('BTC', async () => null);
+
+    expect(result.status).toBe(502);
+    expect((result.body as ErrorResponse).error).toContain('upstream');
+  });
+
+  it('returns 502 when upstream throws error', async () => {
+    const result = await mockFetchPrice('BTC', async () => {
+      throw new Error('Connection timeout');
+    });
+
+    expect(result.status).toBe(502);
+    expect((result.body as ErrorResponse).error).toContain('upstream');
+  });
+
+  it('includes timestamp in successful response', async () => {
+    const before = new Date().toISOString();
+    const result = await mockFetchPrice('BTC', async () => 95000);
+    const after = new Date().toISOString();
+
+    expect(result.status).toBe(200);
+    const timestamp = (result.body as PriceResponse).timestamp;
+    expect(timestamp >= before).toBe(true);
+    expect(timestamp <= after).toBe(true);
   });
 });

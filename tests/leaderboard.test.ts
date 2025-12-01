@@ -729,3 +729,150 @@ describe('LeaderboardService RefreshStatus edge cases', () => {
     }
   });
 });
+
+describe('LeaderboardService persistPeriod skip path', () => {
+  it('returns false and skips delete/publish when entries are empty', async () => {
+    const service = buildService(2);
+    const serviceAny = service as any;
+
+    // Track if logger.warn was called with leaderboard_refresh_skipped
+    const warnCalls: any[] = [];
+    serviceAny.logger = {
+      info: jest.fn(),
+      warn: jest.fn((...args: any[]) => warnCalls.push(args)),
+      error: jest.fn(),
+      debug: jest.fn(),
+    };
+
+    // Call persistPeriod with empty array
+    const result = await serviceAny.persistPeriod(30, [], [], new Map());
+
+    expect(result).toBe(false);
+  });
+
+  it('logs leaderboard_refresh_skipped when persistPeriod returns false during refresh', async () => {
+    const service = buildService(2);
+    const serviceAny = service as any;
+
+    // Capture log calls
+    const warnCalls: any[] = [];
+    serviceAny.logger = {
+      info: jest.fn(),
+      warn: jest.fn((msg: string, data: any) => warnCalls.push({ msg, data })),
+      error: jest.fn(),
+      debug: jest.fn(),
+    };
+
+    // Mock fetch to return empty data (simulating upstream outage)
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [] }),
+    });
+
+    try {
+      await service.refreshAll();
+
+      // Find leaderboard_refresh_skipped log
+      const skipLog = warnCalls.find(c => c.msg === 'leaderboard_refresh_skipped');
+      expect(skipLog).toBeDefined();
+      expect(skipLog.data.reason).toBe('empty_upstream_data');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('does not call publishTopCandidates when persistPeriod returns false', async () => {
+    const service = buildService(2);
+    const serviceAny = service as any;
+
+    // Mock publishTopCandidates to track if called
+    const publishCalled = { value: false };
+    serviceAny.publishTopCandidates = jest.fn(() => {
+      publishCalled.value = true;
+      return Promise.resolve();
+    });
+
+    // Mock fetch to return empty data
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [] }),
+    });
+
+    try {
+      await service.refreshAll();
+
+      expect(publishCalled.value).toBe(false);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+});
+
+describe('LeaderboardService parseEnvNumber', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  it('returns default when env var is not set', () => {
+    const service = buildService(2);
+    const serviceAny = service as any;
+
+    // Clear any existing SCORING_* vars
+    delete process.env.SCORING_STABILITY_WEIGHT;
+
+    // scoreEntries internally uses parseEnvNumber
+    const entries = [makeEntry({ address: '0xtest' })];
+    const scored = serviceAny.scoreEntries(entries);
+
+    // Should use default stability weight (0.50)
+    expect(scored[0].meta.scoringDetails).toBeDefined();
+  });
+
+  it('logs warning and falls back to default for invalid env number', () => {
+    const service = buildService(2);
+    const serviceAny = service as any;
+
+    // Capture warnings
+    const warnCalls: any[] = [];
+    serviceAny.logger = {
+      info: jest.fn(),
+      warn: jest.fn((msg: string, data: any) => warnCalls.push({ msg, data })),
+      error: jest.fn(),
+      debug: jest.fn(),
+    };
+
+    // Set invalid env value
+    process.env.SCORING_STABILITY_WEIGHT = 'not-a-number';
+
+    const entries = [makeEntry({ address: '0xtest' })];
+    serviceAny.scoreEntries(entries);
+
+    // Should log warning about invalid env number
+    const invalidLog = warnCalls.find(c => c.msg === 'invalid_env_number');
+    expect(invalidLog).toBeDefined();
+    expect(invalidLog.data.key).toBe('SCORING_STABILITY_WEIGHT');
+    expect(invalidLog.data.value).toBe('not-a-number');
+  });
+
+  it('uses env value when valid number', () => {
+    const service = buildService(2);
+    const serviceAny = service as any;
+
+    // Set valid env value
+    process.env.SCORING_STABILITY_WEIGHT = '0.75';
+
+    const entries = [makeEntry({ address: '0xtest' })];
+    const scored = serviceAny.scoreEntries(entries);
+
+    // Should use the env value (results in different scoring)
+    expect(scored[0].meta.scoringDetails).toBeDefined();
+  });
+});

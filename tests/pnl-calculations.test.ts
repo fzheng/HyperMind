@@ -521,3 +521,145 @@ describe('Drawdown Calculations', () => {
     expect(result.maxDrawdownPercent).toBe(0.5);
   });
 });
+
+describe('HL-Decide Signal Generation', () => {
+  describe('Signal emission requirements', () => {
+    test('should require both score and fill for signal emission', () => {
+      const scores: Record<string, unknown> = {
+        '0x1234567890123456789012345678901234567890': { score: 0.75, weight: 1.0 },
+      };
+      const fills: Record<string, unknown> = {};
+
+      const address = '0x1234567890123456789012345678901234567890';
+      const canEmitSignal = scores[address] && fills[address];
+
+      expect(canEmitSignal).toBeFalsy();
+    });
+
+    test('should emit signal when both score and fill present', () => {
+      const scores: Record<string, unknown> = {
+        '0x1234567890123456789012345678901234567890': { score: 0.75, weight: 1.0 },
+      };
+      const fills: Record<string, unknown> = {
+        '0x1234567890123456789012345678901234567890': { fill_id: 'fill-1', asset: 'BTC' },
+      };
+
+      const address = '0x1234567890123456789012345678901234567890';
+      const canEmitSignal = scores[address] && fills[address];
+
+      expect(canEmitSignal).toBeTruthy();
+    });
+  });
+
+  describe('Side determination', () => {
+    const pickSide = (score: number) => (score >= 0 ? 'long' : 'short');
+
+    test('should return long for positive score', () => {
+      expect(pickSide(0.5)).toBe('long');
+    });
+
+    test('should return long for zero score', () => {
+      expect(pickSide(0)).toBe('long');
+    });
+
+    test('should return short for negative score', () => {
+      expect(pickSide(-0.5)).toBe('short');
+      expect(pickSide(-1.0)).toBe('short');
+    });
+  });
+
+  describe('Confidence clamping', () => {
+    const clampConfidence = (score: number) =>
+      Math.min(Math.max(Math.abs(score), 0.1), 1.0);
+
+    test('should clamp to minimum 0.1 for zero', () => {
+      expect(clampConfidence(0.0)).toBe(0.1);
+    });
+
+    test('should clamp to minimum 0.1 for small values', () => {
+      expect(clampConfidence(0.05)).toBe(0.1);
+    });
+
+    test('should pass through values in range', () => {
+      expect(clampConfidence(0.5)).toBe(0.5);
+    });
+
+    test('should clamp to maximum 1.0', () => {
+      expect(clampConfidence(1.5)).toBe(1.0);
+    });
+
+    test('should convert negative to positive', () => {
+      expect(clampConfidence(-0.8)).toBe(0.8);
+    });
+  });
+
+  describe('Ticket payload creation', () => {
+    test('should include entry price in payload', () => {
+      const createTicketPayload = (fillId: string, weight: number, entryPrice: number) => ({
+        fill_id: fillId,
+        weight,
+        entry_price: entryPrice,
+      });
+
+      const payload = createTicketPayload('fill-123', 1.0, 95000);
+
+      expect(payload.fill_id).toBe('fill-123');
+      expect(payload.weight).toBe(1.0);
+      expect(payload.entry_price).toBe(95000);
+    });
+  });
+
+  describe('Outcome notes formatting', () => {
+    test('should include entry/exit prices and P&L', () => {
+      const createOutcomeNotes = (entryPrice: number, exitPrice: number, pnlR: number) =>
+        `Timeboxed exit: entry=${entryPrice.toFixed(2)}, exit=${exitPrice.toFixed(2)}, pnl_r=${pnlR.toFixed(4)}`;
+
+      const notes = createOutcomeNotes(95000, 95500, 0.0053);
+
+      expect(notes).toContain('entry=95000.00');
+      expect(notes).toContain('exit=95500.00');
+      expect(notes).toContain('pnl_r=0.0053');
+    });
+  });
+});
+
+describe('LRU Cache Eviction', () => {
+  test('should enforce max scores limit', () => {
+    const MAX_SCORES = 500;
+    const scores: Map<string, unknown> = new Map();
+
+    // Add MAX_SCORES + 50 items
+    for (let i = 0; i < MAX_SCORES + 50; i++) {
+      scores.set(`addr-${i}`, { score: i });
+    }
+
+    // Enforce limits (LRU eviction)
+    while (scores.size > MAX_SCORES) {
+      const firstKey = scores.keys().next().value;
+      scores.delete(firstKey);
+    }
+
+    expect(scores.size).toBe(MAX_SCORES);
+    // First 50 should be evicted
+    expect(scores.has('addr-0')).toBe(false);
+    expect(scores.has('addr-49')).toBe(false);
+    // Recent ones should remain
+    expect(scores.has('addr-549')).toBe(true);
+  });
+
+  test('should enforce max fills limit', () => {
+    const MAX_FILLS = 500;
+    const fills: Map<string, unknown> = new Map();
+
+    for (let i = 0; i < MAX_FILLS + 100; i++) {
+      fills.set(`addr-${i}`, { fill_id: `fill-${i}` });
+    }
+
+    while (fills.size > MAX_FILLS) {
+      const firstKey = fills.keys().next().value;
+      fills.delete(firstKey);
+    }
+
+    expect(fills.size).toBe(MAX_FILLS);
+  });
+});

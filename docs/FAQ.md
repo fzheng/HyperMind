@@ -68,9 +68,9 @@ You can also click "Load More" to fetch historical fills.
 
 ### What do the pin icons mean?
 
-- **Gray pin** - Account pinned from the leaderboard (unlimited)
+- **Blue pin** - Account pinned from the leaderboard (unlimited)
 - **Gold pin** - Custom account you added manually (max 3)
-- **No pin** - System-selected account from top 10
+- **Faded pin** - Unpinned account (system-selected from top performers)
 
 Pinned accounts are always tracked, even when they drop out of the top rankings.
 

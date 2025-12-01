@@ -294,3 +294,167 @@ describe('limit validation', () => {
     expect(safeLimit()).toBe(50);
   });
 });
+
+describe('admin/backfill limit validation (1-500 range)', () => {
+  // Admin backfill has different limit range (1-500)
+  const clampBackfillLimit = (input: unknown) => {
+    const num = Number(input);
+    if (!Number.isFinite(num)) return null; // Invalid
+    return Math.max(1, Math.min(500, num));
+  };
+
+  test('clamps to minimum of 1', () => {
+    expect(clampBackfillLimit(0)).toBe(1);
+    expect(clampBackfillLimit(-10)).toBe(1);
+  });
+
+  test('clamps to maximum of 500', () => {
+    expect(clampBackfillLimit(500)).toBe(500);
+    expect(clampBackfillLimit(501)).toBe(500);
+    expect(clampBackfillLimit(1000)).toBe(500);
+  });
+
+  test('returns null for non-numeric values', () => {
+    expect(clampBackfillLimit('invalid')).toBeNull();
+    expect(clampBackfillLimit(NaN)).toBeNull();
+    expect(clampBackfillLimit(Infinity)).toBeNull();
+  });
+
+  test('passes through valid values', () => {
+    expect(clampBackfillLimit(50)).toBe(50);
+    expect(clampBackfillLimit(250)).toBe(250);
+    expect(clampBackfillLimit(1)).toBe(1);
+  });
+});
+
+describe('insertTradeIfNew deduplication', () => {
+  /**
+   * Simulates insertTradeIfNew behavior:
+   * - If hash exists, update and return existing id (inserted=false)
+   * - If hash doesn't exist, insert and return new id (inserted=true)
+   */
+  type TradeStore = Map<string, { id: number; payload: Record<string, unknown> }>;
+
+  function mockInsertTradeIfNew(
+    store: TradeStore,
+    address: string,
+    payload: Record<string, unknown>
+  ): { id: number | null; inserted: boolean } {
+    const hash = payload.hash as string | undefined;
+
+    if (!hash) {
+      // No hash - always insert (legacy behavior)
+      const id = store.size + 1;
+      store.set(`no-hash-${id}`, { id, payload });
+      return { id, inserted: true };
+    }
+
+    const key = `${address.toLowerCase()}:${hash}`;
+
+    if (store.has(key)) {
+      // Existing trade - update payload
+      const existing = store.get(key)!;
+      existing.payload = { ...existing.payload, ...payload };
+      return { id: existing.id, inserted: false };
+    }
+
+    // New trade - insert
+    const id = store.size + 1;
+    store.set(key, { id, payload });
+    return { id, inserted: true };
+  }
+
+  test('inserts new trade when hash does not exist', () => {
+    const store: TradeStore = new Map();
+
+    const result = mockInsertTradeIfNew(store, '0x1234', {
+      hash: '0xhash1',
+      price: 95000,
+      symbol: 'BTC',
+    });
+
+    expect(result.inserted).toBe(true);
+    expect(result.id).toBe(1);
+    expect(store.size).toBe(1);
+  });
+
+  test('updates existing trade when hash exists (no duplicate)', () => {
+    const store: TradeStore = new Map();
+
+    // First insert
+    mockInsertTradeIfNew(store, '0x1234', {
+      hash: '0xhash1',
+      price: 95000,
+      symbol: 'BTC',
+    });
+
+    // Replay with same hash (should update, not duplicate)
+    const result = mockInsertTradeIfNew(store, '0x1234', {
+      hash: '0xhash1',
+      price: 95100, // Updated price
+      symbol: 'BTC',
+    });
+
+    expect(result.inserted).toBe(false);
+    expect(result.id).toBe(1); // Same id
+    expect(store.size).toBe(1); // Still only one trade
+
+    // Price should be updated
+    const trade = store.get('0x1234:0xhash1');
+    expect(trade?.payload.price).toBe(95100);
+  });
+
+  test('treats different hashes as different trades', () => {
+    const store: TradeStore = new Map();
+
+    const result1 = mockInsertTradeIfNew(store, '0x1234', {
+      hash: '0xhash1',
+      price: 95000,
+    });
+
+    const result2 = mockInsertTradeIfNew(store, '0x1234', {
+      hash: '0xhash2',
+      price: 95100,
+    });
+
+    expect(result1.inserted).toBe(true);
+    expect(result2.inserted).toBe(true);
+    expect(store.size).toBe(2);
+  });
+
+  test('treats same hash on different addresses as different trades', () => {
+    const store: TradeStore = new Map();
+
+    const result1 = mockInsertTradeIfNew(store, '0xAAAA', {
+      hash: '0xsamehash',
+      price: 95000,
+    });
+
+    const result2 = mockInsertTradeIfNew(store, '0xBBBB', {
+      hash: '0xsamehash',
+      price: 95100,
+    });
+
+    expect(result1.inserted).toBe(true);
+    expect(result2.inserted).toBe(true);
+    expect(store.size).toBe(2);
+  });
+
+  test('handles case-insensitive address matching', () => {
+    const store: TradeStore = new Map();
+
+    mockInsertTradeIfNew(store, '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', {
+      hash: '0xhash1',
+      price: 95000,
+    });
+
+    // Same address, different case
+    const result = mockInsertTradeIfNew(store, '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', {
+      hash: '0xhash1',
+      price: 95100,
+    });
+
+    expect(result.inserted).toBe(false);
+    expect(store.size).toBe(1);
+  });
+});

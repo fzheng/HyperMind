@@ -76,14 +76,20 @@ The filter fetches completed trades data for each address (up to 2000 most recen
 
 4. **Publishing**: Only qualified accounts are published as `CandidateEvent` to NATS
 
-## Custom Accounts
+## Pinned Accounts
 
-**Custom accounts bypass this filter**. Accounts added via the custom accounts API:
+**Pinned accounts bypass this filter**. Accounts pinned via the dashboard or API:
 ```bash
-POST /custom-accounts
+# Pin account from leaderboard (unlimited)
+POST /pinned-accounts/leaderboard
 {
-  "address": "0x...",
-  "nickname": "Optional Name"
+  "address": "0x..."
+}
+
+# Add custom pinned account (max 3)
+POST /pinned-accounts/custom
+{
+  "address": "0x..."
 }
 ```
 

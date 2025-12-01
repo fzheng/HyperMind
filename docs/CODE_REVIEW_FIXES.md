@@ -267,7 +267,7 @@ docker compose up --build
 **Files**: `packages/ts-lib/src/persist.ts`, `services/hl-scout/src/index.ts`, `db/migrations/010_pinned_accounts.sql`
 **Feature**: Allow users to pin accounts from leaderboard or add custom addresses
 **Details**:
-- Pin from leaderboard: unlimited, gray pin icon
+- Pin from leaderboard: unlimited, blue pin icon
 - Custom pinned: max 3, gold pin icon
 - Pinned accounts excluded from auto-selection but always tracked
 - API: `/pinned-accounts/*` endpoints

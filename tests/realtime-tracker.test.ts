@@ -364,3 +364,184 @@ describe('ensureFreshSnapshots age check', () => {
     expect(isStale('invalid-date')).toBe(true);
   });
 });
+
+describe('Watchlist + Custom Accounts Integration', () => {
+  /**
+   * Mock watchlist builder that merges leaderboard selections with custom pinned accounts
+   */
+  function buildWatchlist(
+    leaderboardSelected: string[],
+    customPinned: string[]
+  ): string[] {
+    const normalized = new Set<string>();
+
+    // Add leaderboard selections (normalized to lowercase)
+    for (const addr of leaderboardSelected) {
+      normalized.add(addr.toLowerCase());
+    }
+
+    // Add custom pinned accounts (normalized, won't duplicate)
+    for (const addr of customPinned) {
+      normalized.add(addr.toLowerCase());
+    }
+
+    return Array.from(normalized);
+  }
+
+  test('merges custom accounts with leaderboard selections without duplicates', () => {
+    const leaderboard = [
+      '0x1111111111111111111111111111111111111111',
+      '0x2222222222222222222222222222222222222222',
+    ];
+    const custom = [
+      '0x3333333333333333333333333333333333333333',
+      '0x1111111111111111111111111111111111111111', // Already in leaderboard
+    ];
+
+    const watchlist = buildWatchlist(leaderboard, custom);
+
+    expect(watchlist).toHaveLength(3); // No duplicates
+    expect(watchlist).toContain('0x1111111111111111111111111111111111111111');
+    expect(watchlist).toContain('0x2222222222222222222222222222222222222222');
+    expect(watchlist).toContain('0x3333333333333333333333333333333333333333');
+  });
+
+  test('handles case-insensitive duplicate detection', () => {
+    const leaderboard = ['0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'];
+    const custom = ['0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']; // Same address, different case
+
+    const watchlist = buildWatchlist(leaderboard, custom);
+
+    expect(watchlist).toHaveLength(1); // Only one address
+    expect(watchlist[0]).toBe('0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+  });
+
+  test('updates watchlist when custom account is added', () => {
+    // Initial state: only leaderboard
+    let watchlist = buildWatchlist(
+      ['0x1111111111111111111111111111111111111111'],
+      []
+    );
+    expect(watchlist).toHaveLength(1);
+
+    // Add custom account
+    watchlist = buildWatchlist(
+      ['0x1111111111111111111111111111111111111111'],
+      ['0x2222222222222222222222222222222222222222']
+    );
+    expect(watchlist).toHaveLength(2);
+    expect(watchlist).toContain('0x2222222222222222222222222222222222222222');
+  });
+
+  test('updates watchlist when custom account is removed', () => {
+    // Initial state: leaderboard + custom
+    let watchlist = buildWatchlist(
+      ['0x1111111111111111111111111111111111111111'],
+      ['0x2222222222222222222222222222222222222222']
+    );
+    expect(watchlist).toHaveLength(2);
+
+    // Remove custom account
+    watchlist = buildWatchlist(
+      ['0x1111111111111111111111111111111111111111'],
+      [] // Custom removed
+    );
+    expect(watchlist).toHaveLength(1);
+    expect(watchlist).not.toContain('0x2222222222222222222222222222222222222222');
+  });
+
+  test('handles empty leaderboard with only custom accounts', () => {
+    const watchlist = buildWatchlist([], [
+      '0x1111111111111111111111111111111111111111',
+      '0x2222222222222222222222222222222222222222',
+    ]);
+
+    expect(watchlist).toHaveLength(2);
+  });
+
+  test('handles both empty', () => {
+    const watchlist = buildWatchlist([], []);
+    expect(watchlist).toHaveLength(0);
+  });
+});
+
+describe('Custom Account Limit Enforcement', () => {
+  const MAX_CUSTOM_ACCOUNTS = 3;
+
+  test('allows up to MAX_CUSTOM_ACCOUNTS', () => {
+    const customAccounts: string[] = [];
+
+    const addCustomAccount = (address: string): { success: boolean; error?: string } => {
+      if (customAccounts.length >= MAX_CUSTOM_ACCOUNTS) {
+        return { success: false, error: `Maximum of ${MAX_CUSTOM_ACCOUNTS} custom accounts` };
+      }
+      customAccounts.push(address.toLowerCase());
+      return { success: true };
+    };
+
+    // Add 3 accounts (should succeed)
+    expect(addCustomAccount('0x1111111111111111111111111111111111111111').success).toBe(true);
+    expect(addCustomAccount('0x2222222222222222222222222222222222222222').success).toBe(true);
+    expect(addCustomAccount('0x3333333333333333333333333333333333333333').success).toBe(true);
+    expect(customAccounts).toHaveLength(3);
+
+    // 4th should fail with 400-equivalent error
+    const result = addCustomAccount('0x4444444444444444444444444444444444444444');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Maximum');
+    expect(result.error).toContain('3');
+  });
+
+  test('concurrent add requests respect limit atomically', async () => {
+    let count = 0;
+    let lockHolder: Promise<void> | null = null;
+
+    // Simulate atomic add with mutex-style lock
+    const addWithLock = async (address: string): Promise<{ success: boolean }> => {
+      // Wait for any existing lock to release (simulates DB lock)
+      while (lockHolder) {
+        await lockHolder;
+      }
+
+      // Acquire the lock
+      let releaseLock: () => void;
+      lockHolder = new Promise<void>(resolve => {
+        releaseLock = resolve;
+      });
+
+      try {
+        // Check count inside lock
+        if (count >= MAX_CUSTOM_ACCOUNTS) {
+          return { success: false };
+        }
+
+        // Simulate async DB operation
+        await new Promise(r => setTimeout(r, 5));
+
+        count++;
+        return { success: true };
+      } finally {
+        // Release lock
+        lockHolder = null;
+        releaseLock!();
+      }
+    };
+
+    // Fire off 5 concurrent adds
+    const results = await Promise.all([
+      addWithLock('0x1111111111111111111111111111111111111111'),
+      addWithLock('0x2222222222222222222222222222222222222222'),
+      addWithLock('0x3333333333333333333333333333333333333333'),
+      addWithLock('0x4444444444444444444444444444444444444444'),
+      addWithLock('0x5555555555555555555555555555555555555555'),
+    ]);
+
+    const successCount = results.filter(r => r.success).length;
+    const failCount = results.filter(r => !r.success).length;
+
+    // With proper locking, exactly 3 should succeed
+    expect(successCount).toBe(3);
+    expect(failCount).toBe(2);
+    expect(count).toBe(3);
+  });
+});

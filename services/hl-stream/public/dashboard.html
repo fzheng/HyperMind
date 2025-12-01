@@ -15,34 +15,34 @@
     />
   </head>
   <body>
-    <header>
+    <header data-testid="header">
       <div class="header-left">
-        <span class="brand-name">HyperMind</span>
+        <span class="brand-name" data-testid="brand-name">HyperMind</span>
         <span class="brand-separator"></span>
-        <span class="live-clock" id="live-clock">--:--:--</span>
+        <span class="live-clock" id="live-clock" data-testid="live-clock">--:--:--</span>
       </div>
       <div class="header-center">
-        <div class="price-ticker">
-          <div class="price-item" id="btc-price-item">
+        <div class="price-ticker" data-testid="price-ticker">
+          <div class="price-item" id="btc-price-item" data-testid="btc-price-item">
             <span class="price-symbol">BTC</span>
-            <span class="price-value" id="btc-price">—</span>
+            <span class="price-value" id="btc-price" data-testid="btc-price">—</span>
           </div>
           <div class="price-divider"></div>
-          <div class="price-item" id="eth-price-item">
+          <div class="price-item" id="eth-price-item" data-testid="eth-price-item">
             <span class="price-symbol">ETH</span>
-            <span class="price-value" id="eth-price">—</span>
+            <span class="price-value" id="eth-price" data-testid="eth-price">—</span>
           </div>
         </div>
       </div>
       <div class="header-right">
-        <div class="theme-toggle">
-          <button data-theme="dark" title="Dark theme">
+        <div class="theme-toggle" data-testid="theme-toggle">
+          <button data-theme="dark" data-testid="theme-btn-dark" title="Dark theme">
             <svg viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
           </button>
-          <button data-theme="light" title="Light theme">
+          <button data-theme="light" data-testid="theme-btn-light" title="Light theme">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
           </button>
-          <button data-theme="auto" class="active" title="Auto (system)">
+          <button data-theme="auto" data-testid="theme-btn-auto" class="active" title="Auto (system)">
             <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>
           </button>
         </div>
@@ -50,26 +50,26 @@
     </header>
     <main>
       <!-- Row 1: Chart (full width, collapsible) -->
-      <section class="chart-section">
-        <div class="card chart-card">
+      <section class="chart-section" data-testid="chart-section">
+        <div class="card chart-card" data-testid="chart-card">
           <div class="chart-header">
-            <div class="toggle-group">
-              <button class="active" data-symbol="BTCUSDT">BTC</button>
-              <button data-symbol="ETHUSDT">ETH</button>
+            <div class="toggle-group" data-testid="chart-toggle-group">
+              <button class="active" data-symbol="BTCUSDT" data-testid="chart-btn-btc">BTC</button>
+              <button data-symbol="ETHUSDT" data-testid="chart-btn-eth">ETH</button>
             </div>
-            <button class="chart-collapse-btn" id="chart-collapse-btn" title="Collapse chart">
+            <button class="chart-collapse-btn" id="chart-collapse-btn" data-testid="chart-collapse-btn" title="Collapse chart">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M18 15l-6-6-6 6"/>
               </svg>
             </button>
           </div>
-          <div id="tradingview_chart" class="chart-container"></div>
+          <div id="tradingview_chart" class="chart-container" data-testid="tradingview-chart"></div>
         </div>
       </section>
 
       <!-- Row 2: AI Trade Signals (full width) -->
-      <section class="ai-section">
-        <div class="card ai-recommendations-card">
+      <section class="ai-section" data-testid="ai-section">
+        <div class="card ai-recommendations-card" data-testid="ai-signals-card">
           <div class="card-header">
             <h3>
               <span class="ai-icon">⚡</span>
@@ -77,14 +77,14 @@
               <span class="info-icon" title="Generated from tracked trader patterns. Not financial advice.">?</span>
             </h3>
             <div class="card-actions">
-              <span class="ai-status" id="ai-status">
+              <span class="ai-status" id="ai-status" data-testid="ai-status">
                 <span class="ai-status-dot"></span>
                 Analyzing
               </span>
             </div>
           </div>
           <div class="ai-signals-container">
-            <table class="ai-signals-table">
+            <table class="ai-signals-table" data-testid="ai-signals-table">
               <thead>
                 <tr>
                   <th>Time</th>
@@ -96,24 +96,24 @@
                   <th>Status</th>
                 </tr>
               </thead>
-              <tbody id="ai-recommendations-table"></tbody>
+              <tbody id="ai-recommendations-table" data-testid="ai-signals-tbody"></tbody>
             </table>
           </div>
         </div>
       </section>
 
       <!-- Row 3: Tracked Traders + Trader Activity (side by side) -->
-      <section class="grid-bottom">
-        <div class="card leaderboard-card">
+      <section class="grid-bottom" data-testid="grid-bottom">
+        <div class="card leaderboard-card" data-testid="leaderboard-card">
           <div class="card-header">
             <h3>
               Tracked Traders
-              <span class="info-icon" title="Top 30-day performers filtered by BTC/ETH profitability. ★ = custom accounts.">?</span>
+              <span class="info-icon" title="Top traders from leaderboard ranked by win rate, PnL consistency, and risk management. Click the pin icon to track accounts permanently, or add custom addresses below.">?</span>
             </h3>
             <div class="card-actions">
-              <span id="last-refresh" class="last-refresh" title="Last leaderboard refresh"></span>
-              <span id="next-refresh" class="next-refresh" title="Time until next auto-refresh"></span>
-              <span id="refresh-status" class="refresh-status" style="display: none;" title="Refreshing leaderboard data...">
+              <span id="last-refresh" data-testid="last-refresh" class="last-refresh" title="Last leaderboard refresh"></span>
+              <span id="next-refresh" data-testid="next-refresh" class="next-refresh" title="Time until next auto-refresh"></span>
+              <span id="refresh-status" data-testid="refresh-status" class="refresh-status" style="display: none;" title="Refreshing leaderboard data...">
                 <svg class="refresh-spinner" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                 </svg>
@@ -122,20 +122,20 @@
           </div>
 
           <!-- Pinned Accounts Section -->
-          <div class="pinned-accounts-section">
+          <div class="pinned-accounts-section" data-testid="pinned-accounts-section">
             <div class="pinned-accounts-header">
-              <span>Add Custom (<span id="custom-count">0</span>/3)</span>
-              <span class="info-icon" title="Pin accounts from leaderboard (unlimited) or add custom addresses (max 3). Pinned accounts are excluded from auto-selection.">?</span>
+              <span>Add Custom (<span id="custom-count" data-testid="custom-count">0</span>/3)</span>
+              <span class="info-icon" title="Pin accounts from leaderboard (unlimited) or add custom wallet addresses (max 3). Pinned accounts persist across leaderboard refreshes.">?</span>
             </div>
-            <div class="pinned-accounts-form">
-              <input type="text" id="custom-address-input" placeholder="0x..." maxlength="42" />
-              <button id="add-custom-btn" class="add-custom-btn" title="Add custom account">+</button>
+            <div class="pinned-accounts-form" data-testid="pinned-accounts-form">
+              <input type="text" id="custom-address-input" data-testid="custom-address-input" placeholder="0x..." maxlength="42" />
+              <button id="add-custom-btn" data-testid="add-custom-btn" class="add-custom-btn" title="Add custom account">+</button>
             </div>
-            <div id="custom-accounts-error" class="custom-accounts-error"></div>
+            <div id="custom-accounts-error" data-testid="custom-accounts-error" class="custom-accounts-error"></div>
           </div>
 
-          <div class="leaderboard-table-container">
-            <table class="stats-table leaderboard-table">
+          <div class="leaderboard-table-container" data-testid="leaderboard-table-container">
+            <table class="stats-table leaderboard-table" data-testid="leaderboard-table">
               <thead>
                 <tr>
                   <th>Address</th>
@@ -146,27 +146,27 @@
                   <th>PnL Curve</th>
                 </tr>
               </thead>
-              <tbody id="address-table"></tbody>
+              <tbody id="address-table" data-testid="leaderboard-tbody"></tbody>
             </table>
           </div>
         </div>
-        <div class="card fills-card">
+        <div class="card fills-card" data-testid="fills-card">
           <div class="card-header">
             <h3>
-              <span class="live-dot" title="Live"></span>
-              Activity
-              <span class="info-icon" title="Real-time BTC/ETH fills from tracked accounts via WebSocket">?</span>
+              <span class="live-dot" data-testid="live-dot" title="Live"></span>
+              Live Activity
+              <span class="info-icon" title="Real-time BTC/ETH fills from tracked accounts via WebSocket. Click 'Time' header to toggle between absolute and relative time.">?</span>
             </h3>
-            <div class="fills-meta">
-              <span id="fills-count" class="fills-count"></span>
-              <span id="fills-time-range" class="time-range"></span>
+            <div class="fills-meta" data-testid="fills-meta">
+              <span id="fills-count" data-testid="fills-count" class="fills-count"></span>
+              <span id="fills-time-range" data-testid="fills-time-range" class="time-range"></span>
             </div>
           </div>
-          <div class="fills-scroll-container" id="fills-scroll-container">
-            <table class="stats-table fills-table">
+          <div class="fills-scroll-container" id="fills-scroll-container" data-testid="fills-scroll-container">
+            <table class="stats-table fills-table" data-testid="fills-table">
               <thead>
                 <tr>
-                  <th>Time</th>
+                  <th id="fills-time-header" data-testid="fills-time-header" class="clickable-header" title="Click to toggle between absolute and relative time">Time ⏱</th>
                   <th>Address</th>
                   <th>Action</th>
                   <th>Size</th>
@@ -175,19 +175,19 @@
                   <th>PnL</th>
                 </tr>
               </thead>
-              <tbody id="fills-table"></tbody>
+              <tbody id="fills-table" data-testid="fills-tbody"></tbody>
             </table>
-            <div id="fills-load-more" class="load-more-indicator" style="display: none;">
+            <div id="fills-load-more" data-testid="fills-load-more" class="load-more-indicator" style="display: none;">
               <span class="load-more-spinner"></span>
               <span>Loading...</span>
             </div>
           </div>
-          <div class="fills-status-bar" id="fills-status-bar">
-            <span class="fills-status-text" id="fills-status-text">
+          <div class="fills-status-bar" id="fills-status-bar" data-testid="fills-status-bar">
+            <span class="fills-status-text" id="fills-status-text" data-testid="fills-status-text">
               <span class="status-icon">📊</span>
-              <span id="fills-status-message">Waiting for fills...</span>
+              <span id="fills-status-message" data-testid="fills-status-message">Waiting for fills...</span>
             </span>
-            <button id="load-history-btn" class="load-history-btn">Load More</button>
+            <button id="load-history-btn" data-testid="load-history-btn" class="load-history-btn">Load More</button>
           </div>
         </div>
       </section>

@@ -51,9 +51,17 @@ npm run dev:stream   # hl-stream in watch mode
 ## Test
 
 ```bash
-npm test             # Run all 681 tests
-npm run test:coverage # With coverage report
-npm run e2e-smoke    # End-to-end smoke test
+npm run test:unit     # Run Jest unit tests (830 tests)
+npm run test:e2e      # Run Playwright e2e tests (requires dashboard running)
+npm test              # Run both Jest + Playwright
+npm run test:coverage # Jest with coverage report
+npm run e2e-smoke     # End-to-end smoke test
+```
+
+**E2E Prerequisites**: Before running Playwright tests, start the dashboard:
+```bash
+docker compose up -d hl-stream
+npx playwright install chromium  # First time only
 ```
 
 ## Documentation

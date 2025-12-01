@@ -146,6 +146,10 @@ let totalFillCount = 0;
 let isInitialLoad = true; // Prevent flashing during initial load
 let isFirstWsConnect = true; // Track first WebSocket connection
 
+// Time display mode: 'absolute' or 'relative'
+let fillsTimeDisplayMode = 'absolute';
+let relativeTimeInterval = null; // Interval for auto-updating relative times
+
 // Aggregation settings: groups fills within 1-minute windows
 const AGGREGATION_WINDOW_MS = 60000; // 1 minute window
 const MAX_AGGREGATED_GROUPS = 50; // Max groups to keep in memory
@@ -509,6 +513,103 @@ function fmtTime(ts) {
 
 function fmtDateTime(ts) {
   return new Date(ts).toLocaleString([], { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+/**
+ * Format timestamp as relative time (e.g., "3 mins ago", "2 hours ago")
+ * @param {string} ts - ISO timestamp
+ * @returns {string} Relative time string
+ */
+function fmtRelativeTime(ts) {
+  const now = Date.now();
+  const then = new Date(ts).getTime();
+  const diffMs = now - then;
+
+  if (diffMs < 0) return 'just now';
+
+  const seconds = Math.floor(diffMs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (seconds < 60) return 'just now';
+  if (minutes === 1) return '1 min ago';
+  if (minutes < 60) return `${minutes} mins ago`;
+  if (hours === 1) return '1 hour ago';
+  if (hours < 24) return `${hours} hours ago`;
+  if (days === 1) return '1 day ago';
+  return `${days} days ago`;
+}
+
+/**
+ * Format fill time based on current display mode
+ * @param {string} ts - ISO timestamp
+ * @returns {string} Formatted time string
+ */
+function fmtFillTime(ts) {
+  if (fillsTimeDisplayMode === 'relative') {
+    return fmtRelativeTime(ts);
+  }
+  return fmtDateTime(ts);
+}
+
+/**
+ * Update only the time cells without full re-render (for relative time auto-refresh)
+ */
+function updateFillsTimeCells() {
+  if (fillsTimeDisplayMode !== 'relative') return;
+
+  const timeCells = fillsTable.querySelectorAll('td[data-label="Time"]');
+  timeCells.forEach((cell) => {
+    const absoluteTime = cell.getAttribute('title');
+    if (absoluteTime) {
+      cell.textContent = fmtRelativeTime(absoluteTime);
+    }
+  });
+}
+
+/**
+ * Start auto-refresh interval for relative times
+ */
+function startRelativeTimeRefresh() {
+  if (relativeTimeInterval) return; // Already running
+  relativeTimeInterval = setInterval(updateFillsTimeCells, 1000);
+}
+
+/**
+ * Stop auto-refresh interval for relative times
+ */
+function stopRelativeTimeRefresh() {
+  if (relativeTimeInterval) {
+    clearInterval(relativeTimeInterval);
+    relativeTimeInterval = null;
+  }
+}
+
+/**
+ * Toggle between absolute and relative time display
+ */
+function toggleTimeDisplayMode() {
+  fillsTimeDisplayMode = fillsTimeDisplayMode === 'absolute' ? 'relative' : 'absolute';
+
+  // Update header text to show current mode
+  const header = document.getElementById('fills-time-header');
+  if (header) {
+    header.textContent = fillsTimeDisplayMode === 'absolute' ? 'Time ⏱' : 'Time 🕐';
+    header.title = fillsTimeDisplayMode === 'absolute'
+      ? 'Click to show relative time (e.g., "3 mins ago")'
+      : 'Click to show absolute time';
+  }
+
+  // Manage auto-refresh interval
+  if (fillsTimeDisplayMode === 'relative') {
+    startRelativeTimeRefresh();
+  } else {
+    stopRelativeTimeRefresh();
+  }
+
+  // Re-render fills with new time format
+  renderAggregatedFills();
 }
 
 function shortAddress(address) {
@@ -1080,7 +1181,7 @@ function renderGroupRow(group, isNew = false) {
   const addrLower = (group.address || '').toLowerCase();
   let html = `
     <tr class="${group.isAggregated ? 'aggregated-row' : ''} ${newClass}" data-group-id="${group.id || ''}" data-address="${addrLower}">
-      <td data-label="Time">${fmtDateTime(group.time_utc)}</td>
+      <td data-label="Time" title="${fmtDateTime(group.time_utc)}">${fmtFillTime(group.time_utc)}</td>
       <td data-label="Address"><a href="https://hypurrscan.io/address/${displayAddress}" target="_blank" rel="noopener noreferrer">${shortAddress(displayAddress)}</a></td>
       <td data-label="Action"><span class="pill ${sideClass}">${displayAction}</span>${aggBadge}</td>
       <td data-label="Size">${size}</td>
@@ -1797,11 +1898,20 @@ function initLoadHistoryButton() {
   });
 }
 
+// Initialize time header toggle
+function initTimeHeaderToggle() {
+  const header = document.getElementById('fills-time-header');
+  if (!header) return;
+
+  header.addEventListener('click', toggleTimeDisplayMode);
+}
+
 async function init() {
   initChartControls();
   initPinnedAccountsControls();
   initInfiniteScroll();
   initLoadHistoryButton();
+  initTimeHeaderToggle();
   renderChart('BTCUSDT');
 
   // Initialize fills UI with initial state
