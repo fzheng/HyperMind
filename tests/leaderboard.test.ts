@@ -80,7 +80,6 @@ function buildService(selectCount = 2) {
       selectCount,
       periods: [30],
       pageSize: 50,
-      refreshMs: 24 * 60 * 60 * 1000,
     },
     async () => {}
   );
@@ -447,22 +446,12 @@ describe('LeaderboardService RefreshStatus', () => {
     expect(status.refreshIntervalMs).toBe(24 * 60 * 60 * 1000); // 24 hours
   });
 
-  it('returns correct refresh interval from options', () => {
-    const customRefreshMs = 12 * 60 * 60 * 1000; // 12 hours
-    const service = new LeaderboardService(
-      {
-        apiUrl: 'https://example.com',
-        topN: 100,
-        selectCount: 2,
-        periods: [30],
-        pageSize: 50,
-        refreshMs: customRefreshMs,
-      },
-      async () => {}
-    );
+  it('returns 24h refresh interval (daily at 00:30 UTC)', () => {
+    const service = buildService(2);
 
     const status = service.getRefreshStatus();
-    expect(status.refreshIntervalMs).toBe(customRefreshMs);
+    // Always returns 24h since refresh is daily at 00:30 UTC
+    expect(status.refreshIntervalMs).toBe(24 * 60 * 60 * 1000);
   });
 
   it('tracks refresh state transitions', () => {
@@ -473,9 +462,8 @@ describe('LeaderboardService RefreshStatus', () => {
     expect(service.getRefreshStatus().isRefreshing).toBe(false);
   });
 
-  it('calculates next refresh time after start', () => {
+  it('schedules next refresh at 00:30 UTC', () => {
     const service = buildService(2);
-    const refreshMs = 24 * 60 * 60 * 1000; // 24 hours
 
     // Mock fetch to prevent actual API calls
     const originalFetch = global.fetch;
@@ -488,11 +476,67 @@ describe('LeaderboardService RefreshStatus', () => {
       service.start();
 
       const status = service.getRefreshStatus();
-      // Next refresh should be approximately refreshMs from now
       expect(status.nextRefreshAt).not.toBeNull();
       expect(status.nextRefreshInMs).not.toBeNull();
-      expect(status.nextRefreshInMs).toBeLessThanOrEqual(refreshMs);
-      expect(status.nextRefreshInMs).toBeGreaterThan(refreshMs - 1000); // Within 1 second tolerance
+
+      // Verify the next refresh is at 00:30 UTC
+      const nextRefresh = new Date(status.nextRefreshAt!);
+      expect(nextRefresh.getUTCHours()).toBe(0);
+      expect(nextRefresh.getUTCMinutes()).toBe(30);
+      expect(nextRefresh.getUTCSeconds()).toBe(0);
+
+      // Next refresh should be within 24 hours
+      const maxMs = 24 * 60 * 60 * 1000;
+      expect(status.nextRefreshInMs).toBeLessThanOrEqual(maxMs);
+      expect(status.nextRefreshInMs).toBeGreaterThan(0);
+
+      service.stop();
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('schedules for tomorrow if already past 00:30 UTC today', () => {
+    const service = buildService(2);
+
+    // Mock fetch to prevent actual API calls
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [] }),
+    });
+
+    try {
+      service.start();
+
+      const status = service.getRefreshStatus();
+      const now = new Date();
+      const nextRefresh = new Date(status.nextRefreshAt!);
+
+      // Next refresh should be in the future
+      expect(nextRefresh.getTime()).toBeGreaterThan(now.getTime());
+
+      // If we're past 00:30 UTC today, next refresh should be tomorrow
+      const todayAt0030 = new Date(Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate(),
+        0, 30, 0, 0
+      ));
+
+      if (now.getTime() >= todayAt0030.getTime()) {
+        // Should be tomorrow at 00:30
+        const tomorrowAt0030 = new Date(Date.UTC(
+          now.getUTCFullYear(),
+          now.getUTCMonth(),
+          now.getUTCDate() + 1,
+          0, 30, 0, 0
+        ));
+        expect(nextRefresh.getTime()).toBe(tomorrowAt0030.getTime());
+      } else {
+        // Should be today at 00:30
+        expect(nextRefresh.getTime()).toBe(todayAt0030.getTime());
+      }
 
       service.stop();
     } finally {

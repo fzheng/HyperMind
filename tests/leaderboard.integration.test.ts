@@ -685,7 +685,7 @@ describe('LeaderboardService Lifecycle', () => {
     const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
     const mockPublish = jest.fn().mockResolvedValue(undefined);
     const service = new LeaderboardService(
-      { topN: 10, selectCount: 5, periods: [30], refreshMs: 1000 },
+      { topN: 10, selectCount: 5, periods: [30] },
       mockPublish
     );
 
@@ -711,7 +711,7 @@ describe('LeaderboardService Lifecycle', () => {
     const { LeaderboardService } = require('../services/hl-scout/src/leaderboard');
     const mockPublish = jest.fn().mockResolvedValue(undefined);
     const service = new LeaderboardService(
-      { topN: 10, selectCount: 5, periods: [30], refreshMs: 60000 },
+      { topN: 10, selectCount: 5, periods: [30] },
       mockPublish
     );
 

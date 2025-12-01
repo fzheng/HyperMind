@@ -3,7 +3,7 @@
 ## Quick Start
 
 ```bash
-npm run test:unit     # Run Jest unit tests only (830 tests)
+npm run test:unit     # Run Jest unit tests only (831 tests)
 npm run test:e2e      # Run Playwright e2e tests only
 npm test              # Run both Jest + Playwright
 ```
@@ -19,7 +19,7 @@ npm test -- --watch         # Watch mode for development
 npx jest tests/validation   # Run specific test file
 ```
 
-**Test Count**: 830 tests across 20 test files
+**Test Count**: 831 tests across 20 test files
 
 ### E2E Tests (Playwright)
 

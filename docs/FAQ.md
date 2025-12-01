@@ -91,6 +91,15 @@ Fills within 1 minute from the same trader and action are aggregated. Click the 
 
 Traders are ranked based on their 30-day performance on Hyperliquid. This includes win rate, PnL, and consistency metrics.
 
+### When does the leaderboard refresh?
+
+The leaderboard refreshes daily at **00:30 UTC**. This timing avoids conflicts with other services that reset at UTC midnight. After refresh, the system:
+1. Fetches the top 1000 traders from Hyperliquid
+2. Scores and ranks them using the composite scoring algorithm
+3. Enriches the top candidates with detailed stats
+4. Filters by BTC/ETH trading performance
+5. Publishes qualified candidates for tracking
+
 ---
 
 ## Technical

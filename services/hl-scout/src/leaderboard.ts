@@ -308,8 +308,6 @@ export interface LeaderboardOptions {
   periods?: number[];
   /** Page size for paginated API requests */
   pageSize?: number;
-  /** Refresh interval in milliseconds */
-  refreshMs?: number;
   /** Number of entries to enrich with detailed stats */
   enrichCount?: number;
   /** Sort order for leaderboard API (default: PNL) */
@@ -332,11 +330,10 @@ export interface LeaderboardOptions {
  *   topN: 1000,
  *   selectCount: 12,
  *   periods: [30],
- *   refreshMs: 24 * 60 * 60 * 1000
  * }, async (candidate) => {
  *   await publishJson(js, 'a.candidates.v1', candidate);
  * });
- * service.start();
+ * service.start(); // Refreshes daily at 00:30 UTC
  * ```
  */
 /**
@@ -380,7 +377,7 @@ export class LeaderboardService {
   private _isRefreshing = false;
   private _refreshStartedAt: Date | null = null;
   private _lastRefreshAt: Date | null = null;
-  private _lastScheduledRefreshAt: Date | null = null;
+  private _nextScheduledRefreshAt: Date | null = null;
   private _refreshProgress: { phase: string; detail?: string } | null = null;
   private _lastRefreshError: string | null = null;
 
@@ -397,7 +394,6 @@ export class LeaderboardService {
       selectCount: opts.selectCount ?? 12,
       periods: opts.periods?.length ? opts.periods : [30],
       pageSize: opts.pageSize ?? 100,
-      refreshMs: opts.refreshMs ?? 24 * 60 * 60 * 1000,
       enrichCount: opts.enrichCount ?? opts.selectCount ?? 12,
       sort: opts.sort ?? DEFAULT_LEADERBOARD_SORT,
     };
@@ -408,27 +404,104 @@ export class LeaderboardService {
     this.seriesConcurrency = Math.max(1, DEFAULT_SERIES_CONCURRENCY);
   }
 
+  /**
+   * Calculate milliseconds until next daily refresh time (00:30:00 UTC)
+   * Using 00:30 to avoid conflicts with other services that reset at UTC midnight
+   */
+  private getMillisUntilNextRefresh(): number {
+    const now = new Date();
+    // Target: 00:30:00 UTC
+    let nextRefresh = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      0, 30, 0, 0 // 00:30:00.000 UTC
+    ));
+
+    // If we've already passed 00:30 UTC today, schedule for tomorrow
+    if (now.getTime() >= nextRefresh.getTime()) {
+      nextRefresh = new Date(Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate() + 1,
+        0, 30, 0, 0
+      ));
+    }
+
+    return nextRefresh.getTime() - now.getTime();
+  }
+
+  /**
+   * Get the next daily refresh time as a Date (00:30:00 UTC)
+   */
+  private getNextRefreshTime(): Date {
+    const now = new Date();
+    let nextRefresh = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      0, 30, 0, 0
+    ));
+
+    // If we've already passed 00:30 UTC today, schedule for tomorrow
+    if (now.getTime() >= nextRefresh.getTime()) {
+      nextRefresh = new Date(Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate() + 1,
+        0, 30, 0, 0
+      ));
+    }
+
+    return nextRefresh;
+  }
+
+  /**
+   * Schedule refresh at 00:30 UTC daily
+   */
+  private scheduleNextRefresh() {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+
+    const msUntilRefresh = this.getMillisUntilNextRefresh();
+    this._nextScheduledRefreshAt = this.getNextRefreshTime();
+
+    this.logger.info('leaderboard_refresh_scheduled', {
+      nextRefreshAt: this._nextScheduledRefreshAt.toISOString(),
+      msUntilRefresh,
+      humanUntilRefresh: this.formatDuration(msUntilRefresh),
+    });
+
+    this.timer = setTimeout(() => {
+      this.refreshAll()
+        .catch((err) => this.logger.error('leaderboard_refresh_failed', { err: err?.message }))
+        .finally(() => this.scheduleNextRefresh()); // Schedule next day's refresh
+    }, msUntilRefresh);
+  }
+
   start() {
-    this._lastScheduledRefreshAt = new Date();
+    this._nextScheduledRefreshAt = this.getNextRefreshTime();
+
     this.logger.info('leaderboard_service_started', {
-      refreshIntervalMs: this.opts.refreshMs,
-      refreshIntervalHuman: this.formatDuration(this.opts.refreshMs),
+      nextRefreshAt: this._nextScheduledRefreshAt.toISOString(),
       periods: this.opts.periods,
       topN: this.opts.topN,
       selectCount: this.opts.selectCount,
     });
 
+    // Run initial refresh immediately on startup
     this.refreshAll().catch((err) => this.logger.error('leaderboard_refresh_failed', { err: err?.message }));
-    if (this.timer) clearInterval(this.timer);
-    this.timer = setInterval(() => {
-      this._lastScheduledRefreshAt = new Date();
-      this.refreshAll().catch((err) => this.logger.error('leaderboard_refresh_failed', { err: err?.message }));
-    }, this.opts.refreshMs);
+
+    // Schedule daily refresh at 00:30 UTC
+    this.scheduleNextRefresh();
   }
 
   stop() {
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    this._nextScheduledRefreshAt = null;
     this.logger.info('leaderboard_service_stopped');
   }
 
@@ -437,12 +510,10 @@ export class LeaderboardService {
    */
   getRefreshStatus(): RefreshStatus {
     const now = Date.now();
-    let nextRefreshAt: Date | null = null;
     let nextRefreshInMs: number | null = null;
 
-    if (this._lastScheduledRefreshAt && this.timer) {
-      nextRefreshAt = new Date(this._lastScheduledRefreshAt.getTime() + this.opts.refreshMs);
-      nextRefreshInMs = Math.max(0, nextRefreshAt.getTime() - now);
+    if (this._nextScheduledRefreshAt && this.timer) {
+      nextRefreshInMs = Math.max(0, this._nextScheduledRefreshAt.getTime() - now);
     }
 
     return {
@@ -450,9 +521,9 @@ export class LeaderboardService {
       isRefreshing: this._isRefreshing,
       refreshStartedAt: this._refreshStartedAt?.toISOString() || null,
       lastRefreshAt: this._lastRefreshAt?.toISOString() || null,
-      nextRefreshAt: nextRefreshAt?.toISOString() || null,
+      nextRefreshAt: this._nextScheduledRefreshAt?.toISOString() || null,
       nextRefreshInMs,
-      refreshIntervalMs: this.opts.refreshMs,
+      refreshIntervalMs: 24 * 60 * 60 * 1000, // Daily at UTC midnight
       progress: this._refreshProgress || undefined,
       error: this._lastRefreshError || undefined,
     };

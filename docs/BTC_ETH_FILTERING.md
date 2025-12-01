@@ -202,7 +202,7 @@ If the API call to fetch completed trades fails:
 - Each API call fetches up to 2000 trades
 - Typical latency: 200-500ms per account
 - For 10 qualified accounts from 50 candidates: ~10-25 seconds total
-- Filtering only runs during leaderboard refresh (controlled by `LEADERBOARD_REFRESH_MS`)
+- Filtering only runs during leaderboard refresh (daily at 00:30 UTC)
 
 ## Example Scenarios
 
