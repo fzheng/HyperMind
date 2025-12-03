@@ -523,6 +523,10 @@ PNL_CURVE_CONCURRENCY = 2  # Max concurrent requests (reduced to avoid rate limi
 PNL_CURVE_TIMEOUT = 10.0  # Timeout per request in seconds
 PNL_CURVE_DELAY = 0.3  # Delay between requests in seconds
 PNL_CURVE_MAX_RETRIES = 2  # Max retries on rate limit
+PNL_CURVE_CACHE_TTL = int(os.getenv("PNL_CURVE_CACHE_TTL", "21600"))  # Cache TTL in seconds (default 6 hours)
+
+# In-memory cache for PnL curves: {address: (timestamp, curve_data)}
+_pnl_curve_cache: Dict[str, tuple] = {}
 
 
 async def fetch_pnl_curve_from_api(
@@ -602,10 +606,10 @@ async def get_pnl_curves_for_addresses(
     window: str = "month",
 ) -> Dict[str, List[Dict[str, Any]]]:
     """
-    Fetch PnL curves for multiple addresses from Hyperliquid API.
+    Fetch PnL curves for multiple addresses from Hyperliquid API with caching.
 
-    Fetches directly from Hyperliquid, decoupled from legacy leaderboard tables.
-    Uses rate limiting to avoid 429 errors.
+    Uses in-memory cache with TTL to avoid unnecessary API calls.
+    30-day PnL curves don't change frequently, so caching is safe.
 
     Args:
         addresses: List of Ethereum addresses
@@ -617,21 +621,41 @@ async def get_pnl_curves_for_addresses(
     if not addresses:
         return {}
 
+    now = datetime.now(timezone.utc).timestamp()
     curves: Dict[str, List[Dict[str, Any]]] = {}
-    semaphore = asyncio.Semaphore(PNL_CURVE_CONCURRENCY)
+    addresses_to_fetch: List[str] = []
 
-    async def fetch_one(client: httpx.AsyncClient, addr: str, index: int):
-        # Stagger requests to avoid rate limiting
-        if index > 0:
-            await asyncio.sleep(PNL_CURVE_DELAY * index)
-        async with semaphore:
-            points = await fetch_pnl_curve_from_api(client, addr, window)
-            if points:
-                curves[addr.lower()] = points
+    # Check cache first
+    for addr in addresses:
+        addr_lower = addr.lower()
+        if addr_lower in _pnl_curve_cache:
+            cached_ts, cached_data = _pnl_curve_cache[addr_lower]
+            if now - cached_ts < PNL_CURVE_CACHE_TTL:
+                # Cache hit - use cached data
+                curves[addr_lower] = cached_data
+                continue
+        # Cache miss or expired - need to fetch
+        addresses_to_fetch.append(addr)
 
-    async with httpx.AsyncClient() as client:
-        tasks = [fetch_one(client, addr, i) for i, addr in enumerate(addresses)]
-        await asyncio.gather(*tasks, return_exceptions=True)
+    # Fetch missing curves from API
+    if addresses_to_fetch:
+        semaphore = asyncio.Semaphore(PNL_CURVE_CONCURRENCY)
+
+        async def fetch_one(client: httpx.AsyncClient, addr: str, index: int):
+            # Stagger requests to avoid rate limiting
+            if index > 0:
+                await asyncio.sleep(PNL_CURVE_DELAY * index)
+            async with semaphore:
+                points = await fetch_pnl_curve_from_api(client, addr, window)
+                if points:
+                    addr_lower = addr.lower()
+                    curves[addr_lower] = points
+                    # Update cache
+                    _pnl_curve_cache[addr_lower] = (now, points)
+
+        async with httpx.AsyncClient() as client:
+            tasks = [fetch_one(client, addr, i) for i, addr in enumerate(addresses_to_fetch)]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     return curves
 
