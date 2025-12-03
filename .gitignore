@@ -152,3 +152,8 @@ temp_*.json
 playwright-report/
 test-results/
 playwright/.cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

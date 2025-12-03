@@ -1,6 +1,6 @@
 # API Reference
 
-HyperMind exposes REST APIs and WebSocket endpoints across its services. Each service provides interactive Swagger documentation at `/docs`.
+SigmaPilot exposes REST APIs and WebSocket endpoints across its services. Each service provides interactive Swagger documentation at `/docs`.
 
 ## Service URLs
 
@@ -211,7 +211,9 @@ Real-time feeds and dashboard.
 
 ## hl-sage API (Port 4103)
 
-Score computation service (Python/FastAPI).
+Score computation and Alpha Pool management (Python/FastAPI).
+
+### Health & Metrics
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
@@ -219,11 +221,65 @@ Score computation service (Python/FastAPI).
 | `/metrics` | GET | No | Prometheus metrics |
 | `/scores` | GET | No | Current computed scores |
 
+### Alpha Pool (Decoupled System)
+
+The Alpha Pool is **completely independent** from the legacy leaderboard:
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/alpha-pool` | GET | No | Get traders with NIG posteriors and PnL curves |
+| `/alpha-pool/refresh` | POST | No | Populate pool from Hyperliquid leaderboard |
+| `/alpha-pool/addresses` | GET | No | List addresses in the pool |
+| `/alpha-pool/status` | GET | No | NIG model statistics |
+| `/alpha-pool/sample` | POST | No | Demonstrate Thompson sampling |
+
+**POST `/alpha-pool/refresh` Query Parameters:**
+- `limit` - Number of traders to fetch (default: 50, max: 200)
+
+**GET `/alpha-pool` Query Parameters:**
+- `limit` - Max traders to return (default: 50)
+- `min_signals` - Minimum signals required (default: 0)
+
+**GET `/alpha-pool` Response:**
+```json
+{
+  "count": 50,
+  "pool_size": 50,
+  "select_k": 10,
+  "traders": [
+    {
+      "address": "0x...",
+      "nickname": "Trader Name",
+      "nig_m": 0.0,
+      "nig_kappa": 1.0,
+      "nig_alpha": 3.0,
+      "nig_beta": 1.0,
+      "posterior_std": 0.7071,
+      "effective_samples": 0.0,
+      "total_signals": 0,
+      "total_pnl_r": 0.0,
+      "avg_r": 0.0,
+      "is_selected": true,
+      "pnl_curve": [{"ts": 1762127280000, "value": "0.0"}, ...]
+    }
+  ]
+}
+```
+
+### Thompson Sampling (Legacy)
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/bandit/status` | GET | No | Legacy bandit status |
+| `/bandit/decay` | POST | No | Apply decay to posteriors |
+
 ---
 
 ## hl-decide API (Port 4104)
 
-Signal generation service (Python/FastAPI).
+Signal generation and consensus detection (Python/FastAPI).
+
+### Health & Metrics
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
@@ -231,6 +287,39 @@ Signal generation service (Python/FastAPI).
 | `/metrics` | GET | No | Prometheus metrics |
 | `/signals` | GET | No | Recent generated signals |
 | `/outcomes` | GET | No | Signal outcomes |
+
+### Consensus Signals
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/consensus/signals` | GET | No | Recent consensus signals with outcomes |
+| `/consensus/stats` | GET | No | Aggregate win rate and EV statistics |
+
+**GET `/consensus/signals` Query Parameters:**
+- `limit` - Max signals to return (default: 20)
+
+**GET `/consensus/signals` Response:**
+```json
+{
+  "signals": [
+    {
+      "id": 1,
+      "ts": "2025-12-01T00:00:00Z",
+      "asset": "BTC",
+      "direction": "long",
+      "n_traders": 5,
+      "n_agree": 4,
+      "majority_pct": 0.8,
+      "eff_k": 3.2,
+      "p_win": 0.65,
+      "ev_net_r": 0.12,
+      "outcome": "win",
+      "realized_r": 0.15
+    }
+  ],
+  "count": 1
+}
+```
 
 ---
 

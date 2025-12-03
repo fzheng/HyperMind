@@ -260,8 +260,8 @@ function ownerOnly(req: Request, res: Response, next: NextFunction) {
   return next();
 }
 
-/** Default seed addresses when database is empty */
-const DEFAULT_SEEDS = (process.env.SCOUT_SEEDS || '0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333')
+/** Default seed addresses when database is empty (from SCOUT_SEEDS env var) */
+const DEFAULT_SEEDS = (process.env.SCOUT_SEEDS || '')
   .split(',')
   .map((addr) => addr.trim().toLowerCase())
   .filter((addr) => addr.startsWith('0x') && addr.length === 42);

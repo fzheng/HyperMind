@@ -23,13 +23,23 @@ let ownerTokenWarned = false;
 
 export function getOwnerToken(): string {
   const token = requireEnv('OWNER_TOKEN', 'dev-owner');
-  if (token === 'dev-owner' && !ownerTokenWarned) {
-    ownerTokenWarned = true;
-    console.warn(
-      '[SECURITY WARNING] Using default OWNER_TOKEN "dev-owner". ' +
-      'All owner endpoints are publicly writable. ' +
-      'Set OWNER_TOKEN environment variable in production.'
-    );
+  if (token === 'dev-owner') {
+    // Fail-fast in production - don't allow default token
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'OWNER_TOKEN must be explicitly set in production. ' +
+        'Default "dev-owner" token is not allowed.'
+      );
+    }
+    // Warn in development (once per process)
+    if (!ownerTokenWarned) {
+      ownerTokenWarned = true;
+      console.warn(
+        '[SECURITY WARNING] Using default OWNER_TOKEN "dev-owner". ' +
+        'All owner endpoints are publicly writable. ' +
+        'Set OWNER_TOKEN environment variable in production.'
+      );
+    }
   }
   return token;
 }

@@ -1,5 +1,5 @@
 /**
- * HyperMind Dashboard JavaScript
+ * SigmaPilot Dashboard JavaScript
  *
  * Real-time dashboard for monitoring top Hyperliquid traders.
  * Features:
@@ -1033,6 +1033,174 @@ function renderAddresses(stats = [], profiles = {}, holdings = {}) {
   });
 }
 
+// =====================
+// Bandit Status
+// =====================
+const banditTradersTable = document.getElementById('bandit-traders-table');
+const banditConfigEl = document.getElementById('bandit-config');
+const banditStatsEl = document.getElementById('bandit-stats');
+const banditRefreshBtn = document.getElementById('bandit-refresh-btn');
+
+/**
+ * Fetches and renders bandit status from hl-sage
+ */
+async function refreshBanditStatus() {
+  if (banditRefreshBtn) {
+    banditRefreshBtn.disabled = true;
+    banditRefreshBtn.textContent = '...';
+  }
+
+  try {
+    const data = await fetchJson(`${API_BASE}/bandit/status`);
+    renderBanditStatus(data);
+  } catch (err) {
+    console.error('Failed to fetch bandit status:', err);
+    renderBanditEmpty('Unable to load bandit data');
+  } finally {
+    if (banditRefreshBtn) {
+      banditRefreshBtn.disabled = false;
+      banditRefreshBtn.textContent = '↻';
+    }
+  }
+}
+
+/**
+ * Renders bandit configuration display
+ */
+function renderBanditConfig(config) {
+  if (!banditConfigEl || !config) return;
+
+  banditConfigEl.innerHTML = `
+    <div class="bandit-config-item">
+      <span class="bandit-config-label">Pool Size:</span>
+      <span class="bandit-config-value">${config.pool_size || 50}</span>
+    </div>
+    <div class="bandit-config-item">
+      <span class="bandit-config-label">Select K:</span>
+      <span class="bandit-config-value">${config.select_k || 10}</span>
+    </div>
+    <div class="bandit-config-item">
+      <span class="bandit-config-label">Min Samples:</span>
+      <span class="bandit-config-value">${config.min_samples || 5}</span>
+    </div>
+    <div class="bandit-config-item">
+      <span class="bandit-config-label">Decay Factor:</span>
+      <span class="bandit-config-value">${config.decay_factor || 0.95}</span>
+    </div>
+  `;
+}
+
+/**
+ * Renders bandit stats in header
+ */
+function renderBanditStats(stats) {
+  if (!banditStatsEl || !stats) return;
+
+  const total = stats.total_traders_with_signals || 0;
+  const reliable = stats.reliable_traders || 0;
+
+  banditStatsEl.innerHTML = `
+    <span>${reliable} reliable</span>
+    <span>/ ${total} total</span>
+  `;
+}
+
+/**
+ * Renders bandit traders table
+ */
+function renderBanditTraders(traders) {
+  if (!banditTradersTable) return;
+
+  if (!traders || traders.length === 0) {
+    renderBanditEmpty('No traders with signal history yet');
+    return;
+  }
+
+  const rows = traders.map(trader => {
+    const winRate = trader.win_rate || 0;
+    const winRatePercent = (winRate * 100).toFixed(1);
+    const posteriorMean = trader.posterior_mean || 0.5;
+    const posteriorPercent = (posteriorMean * 100).toFixed(1);
+    const signals = trader.total_signals || 0;
+
+    // Confidence based on number of signals (more signals = more confidence)
+    const confidenceLevel = signals >= 20 ? 'high' : signals >= 10 ? 'medium' : 'low';
+    const confidenceWidth = Math.min(100, signals * 5); // 20 signals = 100%
+
+    return `
+      <tr>
+        <td data-label="Address">
+          <a href="https://hypurrscan.io/address/${trader.address}" target="_blank" rel="noopener noreferrer">
+            ${shortAddress(trader.address)}
+          </a>
+        </td>
+        <td data-label="Win Rate">${winRatePercent}%</td>
+        <td data-label="Signals">${signals}</td>
+        <td data-label="Posterior Mean">
+          <div class="posterior-mean">
+            <div class="posterior-bar">
+              <div class="posterior-bar-fill" style="width: ${posteriorPercent}%"></div>
+            </div>
+            <span class="posterior-value">${posteriorPercent}%</span>
+          </div>
+        </td>
+        <td data-label="Confidence">
+          <div class="confidence-bar">
+            <div class="confidence-bar-track">
+              <div class="confidence-bar-fill ${confidenceLevel}" style="width: ${confidenceWidth}%"></div>
+            </div>
+            <span class="confidence-value">${signals} sig</span>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  banditTradersTable.innerHTML = rows;
+}
+
+/**
+ * Renders empty state for bandit
+ */
+function renderBanditEmpty(message) {
+  if (!banditTradersTable) return;
+
+  banditTradersTable.innerHTML = `
+    <tr>
+      <td colspan="5">
+        <div class="bandit-empty-state">
+          <span class="empty-icon">🎰</span>
+          <p>${message}</p>
+          <span class="empty-hint">Trader performance will be tracked after signal outcomes</span>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+/**
+ * Renders the complete bandit status
+ */
+function renderBanditStatus(data) {
+  if (!data) {
+    renderBanditEmpty('No bandit data available');
+    return;
+  }
+
+  renderBanditConfig(data.config);
+  renderBanditStats(data.stats);
+  renderBanditTraders(data.top_traders);
+}
+
+/**
+ * Initialize bandit controls
+ */
+function initBanditControls() {
+  if (banditRefreshBtn) {
+    banditRefreshBtn.addEventListener('click', refreshBanditStatus);
+  }
+}
+
 // Mock AI recommendations data
 const mockAIRecommendations = [
   {
@@ -1922,6 +2090,7 @@ async function init() {
   initInfiniteScroll();
   initLoadHistoryButton();
   initTimeHeaderToggle();
+  initBanditControls();
   renderChart('BTCUSDT');
 
   // Initialize fills UI with initial state
@@ -1935,6 +2104,7 @@ async function init() {
   // Await initial fills load to prevent double-render flash
   await refreshFills();
   renderAIRecommendations();
+  refreshBanditStatus();
   connectWs();
   // Continue polling until positions are ready (if not already)
   if (!positionsReady) {
@@ -1942,6 +2112,220 @@ async function init() {
   }
   setInterval(refreshSummary, 30_000);
   setInterval(refreshFills, 20_000);
+  setInterval(refreshBanditStatus, 60_000); // Refresh bandit every minute
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+// =====================
+// Tab Navigation
+// =====================
+const tabButtons = document.querySelectorAll('.tab-btn');
+const tabContents = document.querySelectorAll('.tab-content');
+
+/**
+ * Switch active tab
+ * @param {string} tabId - The tab to activate
+ */
+function switchTab(tabId) {
+  // Update buttons
+  tabButtons.forEach(btn => {
+    btn.classList.toggle('active', btn.getAttribute('data-tab') === tabId);
+  });
+
+  // Update content
+  tabContents.forEach(content => {
+    const isActive = content.id === `tab-${tabId}`;
+    content.classList.toggle('active', isActive);
+  });
+
+  // Load data for the tab if needed
+  if (tabId === 'alpha-pool') {
+    refreshAlphaPool();
+  }
+
+  // Store preference
+  localStorage.setItem('activeTab', tabId);
+}
+
+// Tab click handlers
+tabButtons.forEach(btn => {
+  btn.addEventListener('click', () => {
+    switchTab(btn.getAttribute('data-tab'));
+  });
+});
+
+// Restore saved tab on load
+const savedTab = localStorage.getItem('activeTab');
+if (savedTab && document.getElementById(`tab-${savedTab}`)) {
+  switchTab(savedTab);
+}
+
+// =====================
+// Alpha Pool
+// =====================
+const alphaPoolTable = document.getElementById('alpha-pool-table');
+const alphaPoolStats = document.getElementById('alpha-pool-stats');
+const alphaPoolConfig = document.getElementById('alpha-pool-config');
+const alphaPoolRefreshBtn = document.getElementById('alpha-pool-refresh-btn');
+const alphaFillsTable = document.getElementById('alpha-fills-table');
+const alphaFillsCount = document.getElementById('alpha-fills-count');
+const alphaPoolBadge = document.getElementById('alpha-pool-badge');
+
+let alphaPoolData = [];
+let alphaPoolAddresses = new Set();
+
+/**
+ * Fetch and render Alpha Pool data
+ */
+async function refreshAlphaPool() {
+  // Show loading state if table is empty
+  if (alphaPoolTable && alphaPoolData.length === 0) {
+    alphaPoolTable.innerHTML = `
+      <tr>
+        <td colspan="7">
+          <div class="alpha-pool-loading">
+            <span class="loading-spinner"></span>
+            <span>Loading Alpha Pool traders...</span>
+          </div>
+        </td>
+      </tr>
+    `;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/alpha-pool`);
+    if (!res.ok) throw new Error('Failed to fetch alpha pool');
+    const data = await res.json();
+
+    alphaPoolData = data.traders || [];
+    alphaPoolAddresses = new Set(alphaPoolData.map(t => t.address.toLowerCase()));
+
+    // Update badge with selected count
+    const selectedCount = alphaPoolData.filter(t => t.is_selected).length;
+    if (alphaPoolBadge) {
+      alphaPoolBadge.textContent = selectedCount > 0 ? selectedCount : '';
+    }
+
+    // Update stats
+    if (alphaPoolStats) {
+      alphaPoolStats.textContent = `${data.count} traders | ${selectedCount} selected`;
+    }
+
+    // Update config display
+    if (alphaPoolConfig) {
+      alphaPoolConfig.innerHTML = `
+        <span>Pool Size: ${data.pool_size}</span>
+        <span>Select K: ${data.select_k}</span>
+      `;
+    }
+
+    // Render table
+    renderAlphaPoolTable();
+  } catch (err) {
+    console.error('Alpha pool fetch error:', err);
+    if (alphaPoolStats) {
+      alphaPoolStats.textContent = 'Error loading';
+    }
+  }
+}
+
+/**
+ * Render Alpha Pool table rows
+ */
+function renderAlphaPoolTable() {
+  if (!alphaPoolTable) return;
+
+  alphaPoolTable.innerHTML = alphaPoolData.map(trader => {
+    const muClass = trader.nig_m > 0 ? 'mu-positive' : trader.nig_m < 0 ? 'mu-negative' : '';
+    const confClass = trader.effective_samples >= 30 ? 'confidence-high' : trader.effective_samples < 10 ? 'confidence-low' : '';
+    const rowClass = trader.is_selected ? 'selected' : '';
+    const shortAddr = `${trader.address.slice(0, 6)}...${trader.address.slice(-4)}`;
+    const displayName = trader.nickname || shortAddr;
+    const sparklineCell = generateSparkline(trader.pnl_curve || []);
+
+    return `
+      <tr class="${rowClass}">
+        <td>
+          <a href="https://hypurrscan.io/address/${trader.address}" target="_blank" rel="noopener" class="address-link" title="${trader.address}">
+            ${displayName}
+          </a>
+        </td>
+        <td class="sparkline-cell">${sparklineCell}</td>
+        <td class="${muClass}">${trader.nig_m >= 0 ? '+' : ''}${trader.nig_m.toFixed(3)}</td>
+        <td class="${confClass}">${trader.effective_samples.toFixed(0)}</td>
+        <td>${trader.total_signals}</td>
+        <td class="${trader.avg_r >= 0 ? 'mu-positive' : 'mu-negative'}">${trader.avg_r >= 0 ? '+' : ''}${trader.avg_r.toFixed(3)}</td>
+        <td>${trader.is_selected ? '<span class="selected-badge" title="Selected for consensus"></span>' : ''}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+/**
+ * Render Alpha Pool activity (fills from pool traders only)
+ */
+function renderAlphaFills() {
+  if (!alphaFillsTable) return;
+
+  // Filter fills to only show Alpha Pool traders
+  const alphaFills = fillsCache.filter(f => alphaPoolAddresses.has(f.address?.toLowerCase()));
+
+  if (alphaFillsCount) {
+    alphaFillsCount.textContent = `${alphaFills.length} fills`;
+  }
+
+  alphaFillsTable.innerHTML = alphaFills.slice(0, 50).map(fill => {
+    const shortAddr = fill.address ? `${fill.address.slice(0, 6)}...${fill.address.slice(-4)}` : '—';
+    const action = fill.action || (fill.side === 'buy' ? 'Buy' : 'Sell');
+    const actionClass = action.toLowerCase().includes('long') || action.toLowerCase().includes('buy') ? 'positive' : 'negative';
+    const symbol = fill.symbol || fill.asset || 'BTC';
+    const time = fill.at ? new Date(fill.at).toLocaleTimeString() : '—';
+    const pnl = fill.realizedPnlUsd != null ? (fill.realizedPnlUsd >= 0 ? '+' : '') + fill.realizedPnlUsd.toFixed(2) : '—';
+    const pnlClass = fill.realizedPnlUsd > 0 ? 'positive' : fill.realizedPnlUsd < 0 ? 'negative' : '';
+
+    return `
+      <tr>
+        <td>${time}</td>
+        <td>
+          <a href="https://hypurrscan.io/address/${fill.address}" target="_blank" rel="noopener" class="address-link">
+            ${shortAddr}
+          </a>
+        </td>
+        <td class="${actionClass}">${action}</td>
+        <td>${Number(fill.size || 0).toFixed(4)} ${symbol}</td>
+        <td>$${Number(fill.priceUsd || fill.price || 0).toLocaleString()}</td>
+        <td class="${pnlClass}">${pnl}</td>
+      </tr>
+    `;
+  }).join('');
+
+  if (alphaFills.length === 0) {
+    alphaFillsTable.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No activity from Alpha Pool traders yet</td></tr>';
+  }
+}
+
+// Alpha Pool refresh button
+if (alphaPoolRefreshBtn) {
+  alphaPoolRefreshBtn.addEventListener('click', () => {
+    alphaPoolRefreshBtn.disabled = true;
+    alphaPoolRefreshBtn.textContent = '...';
+    refreshAlphaPool().finally(() => {
+      alphaPoolRefreshBtn.disabled = false;
+      alphaPoolRefreshBtn.textContent = '↻';
+    });
+  });
+}
+
+// Initialize Alpha Pool on page load (if tab is active)
+if (document.querySelector('.tab-btn.active[data-tab="alpha-pool"]')) {
+  setTimeout(refreshAlphaPool, 500);
+}
+
+// Refresh Alpha Pool periodically when tab is active
+setInterval(() => {
+  const isActive = document.querySelector('.tab-btn.active[data-tab="alpha-pool"]');
+  if (isActive) {
+    refreshAlphaPool();
+  }
+}, 60000); // Every minute

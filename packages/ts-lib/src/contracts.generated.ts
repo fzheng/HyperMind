@@ -30,7 +30,7 @@ export const ScoreEventSchema = z.object({
 export type ScoreEvent = z.infer<typeof ScoreEventSchema>;
 
 export const FillEventSchema = z.object({
-  "fill_id": z.string().min(8).max(64),
+  "fill_id": z.string().min(8).max(128),
   "source": z.enum(["fake", "hyperliquid"]),
   "address": z.string().regex(new RegExp("^0x[a-fA-F0-9]{40}$")),
   "asset": z.string().min(2).max(16),

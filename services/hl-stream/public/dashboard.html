@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <title>HyperMind</title>
+    <title>SigmaPilot</title>
     <link rel="stylesheet" href="/dashboard/static/dashboard.css" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -17,7 +17,7 @@
   <body>
     <header data-testid="header">
       <div class="header-left">
-        <span class="brand-name" data-testid="brand-name">HyperMind</span>
+        <span class="brand-name" data-testid="brand-name">SigmaPilot</span>
         <span class="brand-separator"></span>
         <span class="live-clock" id="live-clock" data-testid="live-clock">--:--:--</span>
       </div>
@@ -67,42 +67,125 @@
         </div>
       </section>
 
-      <!-- Row 2: AI Trade Signals (full width) -->
-      <section class="ai-section" data-testid="ai-section">
-        <div class="card ai-recommendations-card" data-testid="ai-signals-card">
-          <div class="card-header">
-            <h3>
-              <span class="ai-icon">⚡</span>
-              AI Signals
-              <span class="info-icon" title="Generated from tracked trader patterns. Not financial advice.">?</span>
-            </h3>
-            <div class="card-actions">
-              <span class="ai-status" id="ai-status" data-testid="ai-status">
-                <span class="ai-status-dot"></span>
-                Analyzing
-              </span>
+      <!-- Main Tab Navigation -->
+      <nav class="main-tabs" data-testid="main-tabs">
+        <button class="tab-btn active" data-tab="alpha-pool" data-testid="tab-alpha-pool">
+          <span class="tab-icon">🎯</span>
+          Alpha Pool
+          <span class="tab-badge" id="alpha-pool-badge" data-testid="alpha-pool-badge"></span>
+        </button>
+        <button class="tab-btn" data-tab="legacy-leaderboard" data-testid="tab-legacy-leaderboard">
+          <span class="tab-icon">📊</span>
+          Legacy Leaderboard
+        </button>
+      </nav>
+
+      <!-- Tab Content: Alpha Pool -->
+      <div class="tab-content active" id="tab-alpha-pool" data-testid="tab-content-alpha-pool">
+        <!-- AI Trade Signals (consensus-based) -->
+        <section class="ai-section" data-testid="ai-section">
+          <div class="card ai-recommendations-card" data-testid="ai-signals-card">
+            <div class="card-header">
+              <h3>
+                <span class="ai-icon">⚡</span>
+                Consensus Signals
+                <span class="info-icon" title="Signals generated when multiple Alpha Pool traders agree. Based on NIG posterior EV with cost gates.">?</span>
+              </h3>
+              <div class="card-actions">
+                <span class="ai-status" id="ai-status" data-testid="ai-status">
+                  <span class="ai-status-dot"></span>
+                  Monitoring
+                </span>
+              </div>
+            </div>
+            <div class="ai-signals-container">
+              <table class="ai-signals-table" data-testid="ai-signals-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Symbol</th>
+                    <th>Action</th>
+                    <th>Entry Price</th>
+                    <th>Stop Loss</th>
+                    <th>EV (R)</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="ai-recommendations-table" data-testid="ai-signals-tbody"></tbody>
+              </table>
             </div>
           </div>
-          <div class="ai-signals-container">
-            <table class="ai-signals-table" data-testid="ai-signals-table">
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Symbol</th>
-                  <th>Action</th>
-                  <th>Entry Price</th>
-                  <th>Stop Loss</th>
-                  <th>Take Profit</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody id="ai-recommendations-table" data-testid="ai-signals-tbody"></tbody>
-            </table>
-          </div>
-        </div>
-      </section>
+        </section>
 
-      <!-- Row 3: Tracked Traders + Trader Activity (side by side) -->
+        <!-- Alpha Pool (NIG Thompson Sampling) -->
+        <section class="alpha-pool-section" data-testid="alpha-pool-section">
+          <div class="card alpha-pool-card" data-testid="alpha-pool-card">
+            <div class="card-header">
+              <h3>
+                <span class="alpha-icon">🎯</span>
+                Alpha Pool
+                <span class="info-icon" title="Top 50 traders selected by NIG Thompson Sampling. μ = expected R-multiple, κ = confidence (effective samples). Selected traders are used for consensus signals.">?</span>
+              </h3>
+              <div class="card-actions">
+                <span class="alpha-pool-stats" id="alpha-pool-stats" data-testid="alpha-pool-stats"></span>
+                <button id="alpha-pool-refresh-btn" class="alpha-pool-refresh-btn" title="Refresh Alpha Pool">↻</button>
+              </div>
+            </div>
+            <div class="alpha-pool-config" id="alpha-pool-config" data-testid="alpha-pool-config"></div>
+            <div class="alpha-pool-table-container" data-testid="alpha-pool-table-container">
+              <table class="alpha-pool-table" data-testid="alpha-pool-table">
+                <thead>
+                  <tr>
+                    <th>Address</th>
+                    <th title="30-day PnL curve from Hyperliquid">PnL Curve</th>
+                    <th title="Expected R-multiple (posterior mean)">μ (E[R])</th>
+                    <th title="Effective sample size (confidence)">κ (conf)</th>
+                    <th title="Total closed positions">Signals</th>
+                    <th title="Average realized R-multiple">Avg R</th>
+                    <th title="Selected for current consensus window">Selected</th>
+                  </tr>
+                </thead>
+                <tbody id="alpha-pool-table" data-testid="alpha-pool-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- Alpha Pool Activity Feed -->
+        <section class="alpha-activity-section" data-testid="alpha-activity-section">
+          <div class="card fills-card" data-testid="alpha-fills-card">
+            <div class="card-header">
+              <h3>
+                <span class="live-dot" data-testid="alpha-live-dot" title="Live"></span>
+                Alpha Pool Activity
+                <span class="info-icon" title="Real-time fills from Alpha Pool traders only.">?</span>
+              </h3>
+              <div class="fills-meta" data-testid="alpha-fills-meta">
+                <span id="alpha-fills-count" data-testid="alpha-fills-count" class="fills-count"></span>
+              </div>
+            </div>
+            <div class="fills-scroll-container" id="alpha-fills-scroll-container" data-testid="alpha-fills-scroll-container">
+              <table class="stats-table fills-table" data-testid="alpha-fills-table">
+                <thead>
+                  <tr>
+                    <th class="clickable-header" title="Click to toggle time format">Time ⏱</th>
+                    <th>Address</th>
+                    <th>Action</th>
+                    <th>Size</th>
+                    <th>Price</th>
+                    <th>PnL</th>
+                  </tr>
+                </thead>
+                <tbody id="alpha-fills-table" data-testid="alpha-fills-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Tab Content: Legacy Leaderboard -->
+      <div class="tab-content" id="tab-legacy-leaderboard" data-testid="tab-content-legacy-leaderboard">
+        <!-- Legacy Row: Tracked Traders + Trader Activity (side by side) -->
       <section class="grid-bottom" data-testid="grid-bottom">
         <div class="card leaderboard-card" data-testid="leaderboard-card">
           <div class="card-header">
@@ -191,6 +274,7 @@
           </div>
         </div>
       </section>
+      </div><!-- End tab-legacy-leaderboard -->
     </main>
     <script src="https://s3.tradingview.com/tv.js"></script>
     <script type="module" src="/dashboard/static/dashboard.js"></script>

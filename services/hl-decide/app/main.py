@@ -1,16 +1,19 @@
 """
 HL-Decide Service
 
-Generates trading signals based on consensus scores from hl-sage.
-Tracks signal outcomes and persists results for performance analysis.
+Generates trading signals based on position lifecycles from tracked traders.
+Tracks complete position open/close cycles for accurate performance measurement.
 
 Key responsibilities:
 - Consume `b.scores.v1` and `c.fills.v1` events from NATS
-- Generate trading signals when score and fill events align
-- Publish `d.signals.v1` events for signal emission
-- Track and close positions after timeout
-- Publish `d.outcomes.v1` events with P&L results
-- Persist tickets and outcomes to PostgreSQL
+- Track position opens (signals) and closes (outcomes)
+- Update trader NIG posteriors with position-level R-multiples
+- Persist position signals to PostgreSQL
+
+Position Lifecycle:
+- Open: "Open Long (Open New)" or "Open Short (Open New)" fills
+- Close: "Close Long (Close All)" or "Close Short (Close All)" fills
+- Ignored: "Increase" and "Decrease" fills (partial position changes)
 
 @module hl-decide
 """
@@ -18,8 +21,8 @@ Key responsibilities:
 import asyncio
 import json
 import os
-from datetime import datetime, timedelta, timezone
-from typing import Dict
+from datetime import datetime, timezone
+from typing import Dict, Optional
 from uuid import uuid4
 from collections import OrderedDict
 
@@ -29,7 +32,8 @@ from fastapi import FastAPI
 from prometheus_client import Counter, Histogram, generate_latest, CollectorRegistry, CONTENT_TYPE_LATEST
 from starlette.responses import Response
 
-from contracts.py.models import FillEvent, ScoreEvent, SignalEvent, OutcomeEvent
+from contracts.py.models import FillEvent, ScoreEvent
+from .consensus import ConsensusDetector, Fill, ConsensusSignal
 
 SERVICE_NAME = "hl-decide"
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
@@ -37,266 +41,311 @@ DB_URL = os.getenv("DATABASE_URL", "postgresql://hlbot:hlbotpassword@localhost:5
 MAX_SCORES = int(os.getenv("MAX_SCORES", "500"))
 MAX_FILLS = int(os.getenv("MAX_FILLS", "500"))
 
-app = FastAPI(title="hl-decide", version="0.1.0")
+# R-multiple calculation: assumed stop loss fraction (1% = 0.01)
+ASSUMED_STOP_FRACTION = float(os.getenv("ASSUMED_STOP_FRACTION", "0.01"))
+
+# NIG prior parameters
+NIG_PRIOR_M = 0.0
+NIG_PRIOR_KAPPA = 1.0
+NIG_PRIOR_ALPHA = 3.0
+NIG_PRIOR_BETA = 1.0
+
+app = FastAPI(title="hl-decide", version="0.3.0")
 scores: OrderedDict[str, ScoreEvent] = OrderedDict()
 fills: OrderedDict[str, FillEvent] = OrderedDict()
-pending_outcomes: Dict[str, asyncio.Task] = {}  # Track pending outcome tasks by ticket_id
+
+# Consensus detector for Alpha Pool signal generation
+consensus_detector = ConsensusDetector()
+
 registry = CollectorRegistry()
-signal_counter = Counter("decide_signals_total", "Signals emitted", registry=registry)
-outcome_counter = Counter("decide_outcomes_total", "Outcomes emitted", registry=registry)
-decision_latency = Histogram(
-    "decide_latency_seconds",
-    "Latency between receiving score and emitting signal",
+position_open_counter = Counter("decide_positions_opened_total", "Positions opened", registry=registry)
+position_close_counter = Counter("decide_positions_closed_total", "Positions closed", registry=registry)
+fill_counter = Counter("decide_fills_total", "Total fills processed", registry=registry)
+consensus_signal_counter = Counter("decide_consensus_signals_total", "Consensus signals generated", registry=registry)
+position_pnl_histogram = Histogram(
+    "decide_position_pnl_r",
+    "Position P&L in R-multiples",
     registry=registry,
-    buckets=(0.01, 0.05, 0.1, 0.5),
+    buckets=(-2, -1, -0.5, 0, 0.5, 1, 2, 5),
 )
 
 
 async def ensure_stream(js, name: str, subjects):
-    """
-    Ensures a NATS JetStream stream exists, creating it if necessary.
-
-    Args:
-        js: JetStream client
-        name: Stream name
-        subjects: List of subject patterns to capture
-    """
+    """Ensures a NATS JetStream stream exists."""
     try:
         await js.stream_info(name)
     except Exception:
         await js.add_stream(name=name, subjects=subjects)
 
 
-def pick_side(score: ScoreEvent) -> str:
-    """
-    Determines trading direction based on score value.
+def winsorize_r(r: float, r_min: float = -2.0, r_max: float = 2.0) -> float:
+    """Winsorize R-multiple to bounds to tame heavy tails."""
+    return max(r_min, min(r_max, r))
 
-    Args:
-        score: ScoreEvent containing the consensus score
+
+def parse_action(fill: FillEvent) -> Optional[str]:
+    """
+    Parse the action from a fill event's meta.
 
     Returns:
-        "long" if score >= 0, "short" otherwise
+        'open_long', 'open_short', 'close_long', 'close_short', or None for other actions
     """
-    return "long" if score.score >= 0 else "short"
+    if not isinstance(fill.meta, dict):
+        return None
+
+    action = fill.meta.get('action', '')
+    if not action:
+        return None
+
+    action_lower = action.lower()
+
+    if 'open' in action_lower and 'open new' in action_lower:
+        if 'long' in action_lower:
+            return 'open_long'
+        elif 'short' in action_lower:
+            return 'open_short'
+
+    if 'close' in action_lower and 'close all' in action_lower:
+        if 'long' in action_lower:
+            return 'close_long'
+        elif 'short' in action_lower:
+            return 'close_short'
+
+    return None
 
 
-async def persist_ticket(conn, ticket_id: str, signal: SignalEvent):
+async def create_position_signal(conn, fill: FillEvent, direction: str) -> Optional[str]:
     """
-    Persists a signal ticket to the database.
+    Create a new position signal when a position opens.
 
     Args:
         conn: Database connection
-        ticket_id: Unique ticket identifier
-        signal: SignalEvent to persist
+        fill: The opening fill event
+        direction: 'long' or 'short'
+
+    Returns:
+        Position signal ID if created, None if duplicate
     """
-    # Use model_dump_json() to properly serialize datetimes, then parse back for DB
-    # This avoids TypeError from json.dumps on datetime objects
-    payload_json = signal.model_dump_json()
-    await conn.execute(
-        """
-        INSERT INTO tickets (id, ts, address, asset, side, payload)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        """,
-        ticket_id,
-        signal.signal_ts,
-        signal.address,
-        signal.asset,
-        signal.side,
-        payload_json,
-    )
+    signal_id = str(uuid4())
 
-
-async def persist_outcome(conn, outcome: OutcomeEvent):
-    """
-    Persists a ticket outcome to the database.
-
-    Args:
-        conn: Database connection
-        outcome: OutcomeEvent containing P&L and close reason
-    """
-    await conn.execute(
-        """
-        INSERT INTO ticket_outcomes (ticket_id, closed_ts, result_r, closed_reason, notes)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (ticket_id) DO UPDATE SET
-          closed_ts = EXCLUDED.closed_ts,
-          result_r = EXCLUDED.result_r,
-          closed_reason = EXCLUDED.closed_reason,
-          notes = EXCLUDED.notes
-        """,
-        outcome.ticket_id,
-        outcome.closed_ts,
-        outcome.result_r,
-        outcome.closed_reason,
-        outcome.notes,
-    )
-
-
-async def update_trader_performance(address: str, success: bool, pnl_r: float) -> None:
-    """
-    Update trader performance statistics after a signal outcome.
-    Updates Bayesian prior (alpha/beta) for Thompson Sampling.
-
-    Args:
-        address: Trader's Ethereum address
-        success: Whether the signal was profitable (result_r > 0)
-        pnl_r: P&L in R-multiples
-    """
     try:
-        async with app.state.db.acquire() as conn:
-            # First ensure the trader exists with default Beta(1,1) prior
-            await conn.execute(
-                """
-                INSERT INTO trader_performance (address)
-                VALUES ($1)
-                ON CONFLICT (address) DO NOTHING
-                """,
-                address.lower(),
+        await conn.execute(
+            """
+            INSERT INTO position_signals (
+                id, address, asset, direction,
+                entry_fill_id, entry_price, entry_size, entry_ts,
+                status
             )
-            # Then update their statistics
-            # alpha += 1 if success, beta += 1 if failure
-            await conn.execute(
-                """
-                UPDATE trader_performance SET
-                    total_signals = total_signals + 1,
-                    winning_signals = winning_signals + $2,
-                    total_pnl_r = total_pnl_r + $3,
-                    alpha = alpha + $4,
-                    beta = beta + $5,
-                    last_signal_at = NOW(),
-                    updated_at = NOW()
-                WHERE address = $1
-                """,
-                address.lower(),
-                1 if success else 0,
-                pnl_r,
-                1 if success else 0,  # alpha increment
-                0 if success else 1,  # beta increment
-            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open')
+            ON CONFLICT (entry_fill_id) DO NOTHING
+            """,
+            signal_id,
+            fill.address.lower(),
+            fill.asset,
+            direction,
+            fill.fill_id,
+            fill.price,
+            fill.size,
+            fill.ts,
+        )
+
+        # Update positions_opened count
+        await conn.execute(
+            """
+            INSERT INTO trader_performance (address, positions_opened)
+            VALUES ($1, 1)
+            ON CONFLICT (address) DO UPDATE SET
+                positions_opened = trader_performance.positions_opened + 1,
+                updated_at = NOW()
+            """,
+            fill.address.lower(),
+        )
+
+        print(f"[hl-decide] Position opened: {fill.address[:10]}... {direction} {fill.asset} @ {fill.price}")
+        return signal_id
+
     except Exception as e:
-        print(f"[hl-decide] Failed to update trader performance for {address}: {e}")
+        print(f"[hl-decide] Failed to create position signal: {e}")
+        return None
 
 
-async def calculate_pnl(signal: SignalEvent, entry_price: float, exit_price: float) -> float:
+async def close_position_signal(conn, fill: FillEvent, direction: str) -> Optional[float]:
     """
-    Calculate P&L as a fraction (R-multiple).
-    For long: (exit - entry) / entry
-    For short: (entry - exit) / entry
-    """
-    if entry_price <= 0 or exit_price <= 0:
-        return 0.0
-
-    if signal.side == "long":
-        return (exit_price - entry_price) / entry_price
-    else:  # short
-        return (entry_price - exit_price) / entry_price
-
-
-async def get_current_price(asset: str) -> float:
-    """
-    Fetch current price from the most recent fill for this asset.
-    In a production system, this would query a price feed or market data API.
-    """
-    try:
-        async with app.state.db.acquire() as conn:
-            result = await conn.fetchrow(
-                """
-                SELECT payload->>'priceUsd' as price
-                FROM hl_events
-                WHERE type = 'trade' AND symbol = $1
-                ORDER BY at DESC
-                LIMIT 1
-                """,
-                asset
-            )
-            if result and result['price']:
-                return float(result['price'])
-    except Exception:
-        pass
-    return 0.0
-
-
-async def emit_signal(address: str):
-    """
-    Emits a trading signal if both score and fill data are available.
-    Creates a ticket and schedules outcome tracking.
+    Close an open position signal and calculate R-multiple.
 
     Args:
-        address: Ethereum address to emit signal for
+        conn: Database connection
+        fill: The closing fill event
+        direction: 'long' or 'short' (the direction being closed)
+
+    Returns:
+        R-multiple if position was closed, None otherwise
     """
-    score = scores.get(address)
-    fill = fills.get(address)
-    if not score or not fill:
-        return
-    with decision_latency.time():
-        signal_ts = datetime.now(timezone.utc)
-        ticket_id = str(uuid4())
+    # Find the open position for this address+asset+direction
+    open_signal = await conn.fetchrow(
+        """
+        SELECT id, entry_price, entry_size, entry_ts
+        FROM position_signals
+        WHERE address = $1 AND asset = $2 AND direction = $3 AND status = 'open'
+        ORDER BY entry_ts DESC
+        LIMIT 1
+        """,
+        fill.address.lower(),
+        fill.asset,
+        direction,
+    )
 
-        # Store entry price in payload for later P&L calculation
-        entry_price = fill.price if hasattr(fill, 'price') and fill.price else 0.0
+    if not open_signal:
+        print(f"[hl-decide] No open {direction} position found for {fill.address[:10]}... {fill.asset}")
+        return None
 
-        signal = SignalEvent(
-            ticket_id=ticket_id,
-            address=address,
-            asset=fill.asset,
-            side=pick_side(score),
-            confidence=min(max(abs(score.score), 0.1), 1.0),
-            score_ts=score.ts,
-            signal_ts=signal_ts,
-            expires_at=signal_ts + timedelta(seconds=10),
-            reason="consensus",
-            payload={"fill_id": fill.fill_id, "weight": score.weight, "entry_price": entry_price},
-        )
-        await app.state.js.publish("d.signals.v1", signal.model_dump_json().encode("utf-8"))
-        async with app.state.db.acquire() as conn:
-            await persist_ticket(conn, ticket_id, signal)
-        signal_counter.inc()
+    # Calculate R-multiple from realized_pnl
+    entry_price = float(open_signal['entry_price'])
+    entry_size = float(open_signal['entry_size'])
+    entry_notional = entry_price * entry_size
+    risk_amount = entry_notional * ASSUMED_STOP_FRACTION
 
-        # Track the outcome task to prevent duplicates and ensure cleanup
-        if ticket_id not in pending_outcomes:
-            task = asyncio.create_task(schedule_close(ticket_id, signal))
-            pending_outcomes[ticket_id] = task
+    # Use realized_pnl from Hyperliquid if available
+    if fill.realized_pnl is not None and risk_amount > 0:
+        result_r = float(fill.realized_pnl) / risk_amount
+    else:
+        # Fallback: calculate from price difference
+        if direction == 'long':
+            pnl = (fill.price - entry_price) * entry_size
+        else:  # short
+            pnl = (entry_price - fill.price) * entry_size
+        result_r = pnl / risk_amount if risk_amount > 0 else 0.0
+
+    # Update the position signal
+    await conn.execute(
+        """
+        UPDATE position_signals SET
+            exit_fill_id = $1,
+            exit_price = $2,
+            exit_ts = $3,
+            realized_pnl = $4,
+            result_r = $5,
+            status = 'closed',
+            closed_reason = 'full_close',
+            updated_at = NOW()
+        WHERE id = $6
+        """,
+        fill.fill_id,
+        fill.price,
+        fill.ts,
+        fill.realized_pnl,
+        result_r,
+        open_signal['id'],
+    )
+
+    print(f"[hl-decide] Position closed: {fill.address[:10]}... {direction} {fill.asset} R={result_r:.2f}")
+    return result_r
 
 
-async def schedule_close(ticket_id: str, signal: SignalEvent):
+async def update_trader_performance(conn, address: str, result_r: float) -> None:
     """
-    Schedules automatic position close after timeout period.
-    Calculates P&L and publishes outcome event.
+    Update trader performance statistics with a position outcome.
+    Updates NIG posterior for Thompson Sampling.
 
     Args:
-        ticket_id: Unique ticket identifier
-        signal: Original SignalEvent containing entry price
+        conn: Database connection
+        address: Trader's Ethereum address
+        result_r: P&L in R-multiples
     """
-    try:
-        await asyncio.sleep(10)
+    # Winsorize for NIG update
+    r = winsorize_r(result_r)
+    success = result_r > 0
 
-        # Get entry price from signal payload
-        entry_price = signal.payload.get('entry_price', 0.0) if isinstance(signal.payload, dict) else 0.0
-
-        # Fetch current price
-        exit_price = await get_current_price(signal.asset)
-
-        # Calculate actual P&L
-        result_r = await calculate_pnl(signal, entry_price, exit_price)
-
-        outcome = OutcomeEvent(
-            ticket_id=ticket_id,
-            closed_ts=datetime.now(timezone.utc),
-            result_r=result_r,
-            closed_reason="timebox",
-            notes=f"Timeboxed exit: entry={entry_price:.2f}, exit={exit_price:.2f}, pnl_r={result_r:.4f}",
+    # First ensure the trader exists with default priors
+    await conn.execute(
+        """
+        INSERT INTO trader_performance (
+            address, nig_m, nig_kappa, nig_alpha, nig_beta
         )
-        await app.state.js.publish("d.outcomes.v1", outcome.model_dump_json().encode("utf-8"))
-        async with app.state.db.acquire() as conn:
-            await persist_outcome(conn, outcome)
-        outcome_counter.inc()
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (address) DO NOTHING
+        """,
+        address.lower(),
+        NIG_PRIOR_M,
+        NIG_PRIOR_KAPPA,
+        NIG_PRIOR_ALPHA,
+        NIG_PRIOR_BETA,
+    )
 
-        # Update trader performance for bandit algorithm (online learning)
-        success = result_r > 0
-        await update_trader_performance(signal.address, success, result_r)
-    finally:
-        # Clean up the task from pending_outcomes to prevent memory leaks
-        pending_outcomes.pop(ticket_id, None)
+    # Update stats and NIG posterior
+    await conn.execute(
+        """
+        UPDATE trader_performance SET
+            -- Position stats
+            positions_closed = positions_closed + 1,
+            positions_won = positions_won + $2,
+            -- Legacy stats (for backwards compatibility)
+            total_signals = total_signals + 1,
+            winning_signals = winning_signals + $2,
+            total_pnl_r = total_pnl_r + $3,
+            -- Beta update (legacy)
+            alpha = alpha + $4,
+            beta = beta + $5,
+            -- NIG conjugate update
+            nig_kappa = COALESCE(nig_kappa, $6) + 1,
+            nig_m = (COALESCE(nig_kappa, $6) * COALESCE(nig_m, $7) + $8) / (COALESCE(nig_kappa, $6) + 1),
+            nig_alpha = COALESCE(nig_alpha, $9) + 0.5,
+            nig_beta = COALESCE(nig_beta, $10) + 0.5 * COALESCE(nig_kappa, $6) * POWER($8 - COALESCE(nig_m, $7), 2) / (COALESCE(nig_kappa, $6) + 1),
+            -- Rolling average R
+            avg_r = (COALESCE(avg_r, 0) * GREATEST(positions_closed - 1, 0) + $8) / GREATEST(positions_closed, 1),
+            last_signal_at = NOW(),
+            updated_at = NOW()
+        WHERE address = $1
+        """,
+        address.lower(),
+        1 if success else 0,
+        result_r,
+        1 if success else 0,  # alpha increment
+        0 if success else 1,  # beta increment
+        NIG_PRIOR_KAPPA,
+        NIG_PRIOR_M,
+        r,  # winsorized R for NIG
+        NIG_PRIOR_ALPHA,
+        NIG_PRIOR_BETA,
+    )
+
+
+async def handle_fill_for_positions(fill: FillEvent) -> None:
+    """
+    Process a fill event for position tracking.
+
+    Only tracks position opens and closes, ignoring increases/decreases.
+    """
+    action = parse_action(fill)
+    if not action:
+        return  # Ignore non-position-changing fills
+
+    try:
+        async with app.state.db.acquire() as conn:
+            if action == 'open_long':
+                await create_position_signal(conn, fill, 'long')
+                position_open_counter.inc()
+
+            elif action == 'open_short':
+                await create_position_signal(conn, fill, 'short')
+                position_open_counter.inc()
+
+            elif action == 'close_long':
+                result_r = await close_position_signal(conn, fill, 'long')
+                if result_r is not None:
+                    await update_trader_performance(conn, fill.address, result_r)
+                    position_close_counter.inc()
+                    position_pnl_histogram.observe(result_r)
+
+            elif action == 'close_short':
+                result_r = await close_position_signal(conn, fill, 'short')
+                if result_r is not None:
+                    await update_trader_performance(conn, fill.address, result_r)
+                    position_close_counter.inc()
+                    position_pnl_histogram.observe(result_r)
+
+    except Exception as e:
+        print(f"[hl-decide] Error handling fill for positions: {e}")
 
 
 async def persist_score(address: str, score: ScoreEvent) -> None:
@@ -423,51 +472,165 @@ async def restore_state() -> tuple[int, int]:
 def enforce_limits():
     """Enforce memory limits on scores and fills using LRU eviction."""
     while len(scores) > MAX_SCORES:
-        scores.popitem(last=False)  # Remove oldest
+        scores.popitem(last=False)
     while len(fills) > MAX_FILLS:
-        fills.popitem(last=False)  # Remove oldest
+        fills.popitem(last=False)
 
 
 async def handle_score(msg):
-    """
-    Handles incoming score events from hl-sage.
-    Updates score state and attempts to emit signal.
-
-    Args:
-        msg: NATS message containing ScoreEvent JSON
-    """
+    """Handle incoming score events from hl-sage."""
     data = ScoreEvent.model_validate_json(msg.data.decode())
-    # Move to end (most recently used)
     if data.address in scores:
         scores.move_to_end(data.address)
     scores[data.address] = data
-
-    # Persist to database
     await persist_score(data.address, data)
-
     enforce_limits()
-    await emit_signal(data.address)
 
 
 async def handle_fill(msg):
     """
-    Handles incoming fill events from hl-stream.
-    Updates fill state and attempts to emit signal.
+    Handle incoming fill events from hl-stream.
 
-    Args:
-        msg: NATS message containing FillEvent JSON
+    Processes fills for:
+    1. Position tracking (open/close detection for R-multiple calculation)
+    2. Consensus detection (Alpha Pool signal generation)
     """
     data = FillEvent.model_validate_json(msg.data.decode())
-    # Move to end (most recently used)
+
+    # Update fill cache
     if data.address in fills:
         fills.move_to_end(data.address)
     fills[data.address] = data
-
-    # Persist to database
     await persist_fill(data.address, data)
-
     enforce_limits()
-    await emit_signal(data.address)
+    fill_counter.inc()
+
+    # Process for position tracking (this is where the magic happens)
+    await handle_fill_for_positions(data)
+
+    # Process for consensus detection
+    await process_fill_for_consensus(data)
+
+
+async def process_fill_for_consensus(data: FillEvent) -> None:
+    """
+    Process a fill through the consensus detector.
+
+    Converts FillEvent to Fill dataclass and checks for consensus.
+    If consensus is detected, publishes signal to NATS and persists to DB.
+
+    Args:
+        data: FillEvent from hl-stream
+    """
+    try:
+        # Convert FillEvent to consensus Fill
+        fill = Fill(
+            fill_id=data.fill_id,
+            address=data.address,
+            asset=data.asset,
+            side=data.side,
+            size=float(data.size or 0),
+            price=float(data.price) if hasattr(data, 'price') and data.price else 0.0,
+            ts=data.ts if isinstance(data.ts, datetime) else datetime.fromisoformat(str(data.ts).replace('Z', '+00:00')),
+        )
+
+        # Update current price in detector
+        if fill.price > 0:
+            consensus_detector.set_current_price(fill.asset, fill.price)
+
+        # Process fill and check for consensus
+        signal = consensus_detector.process_fill(fill)
+
+        if signal:
+            await handle_consensus_signal(signal)
+
+    except Exception as e:
+        print(f"[hl-decide] Consensus processing error: {e}")
+
+
+async def handle_consensus_signal(signal: ConsensusSignal) -> None:
+    """
+    Handle a detected consensus signal.
+
+    Publishes to NATS and persists to database.
+
+    Args:
+        signal: The consensus signal to process
+    """
+    try:
+        consensus_signal_counter.inc()
+
+        # Log signal
+        print(f"[hl-decide] CONSENSUS SIGNAL: {signal.direction} {signal.symbol} "
+              f"@ {signal.entry_price:.2f}, effK={signal.eff_k:.2f}, EV={signal.ev_net_r:.3f}R, "
+              f"traders={signal.n_agreeing}/{signal.n_traders}")
+
+        # Build signal payload for NATS
+        signal_payload = {
+            "id": signal.id,
+            "symbol": signal.symbol,
+            "direction": signal.direction,
+            "entry_price": signal.entry_price,
+            "stop_price": signal.stop_price,
+            "n_traders": signal.n_traders,
+            "n_agreeing": signal.n_agreeing,
+            "eff_k": signal.eff_k,
+            "dispersion": signal.dispersion,
+            "p_win": signal.p_win,
+            "ev_gross_r": signal.ev_gross_r,
+            "ev_cost_r": signal.ev_cost_r,
+            "ev_net_r": signal.ev_net_r,
+            "latency_ms": signal.latency_ms,
+            "median_voter_price": signal.median_voter_price,
+            "mid_delta_bps": signal.mid_delta_bps,
+            "created_at": signal.created_at.isoformat(),
+            "trigger_addresses": signal.trigger_addresses,
+        }
+
+        # Publish to NATS
+        await app.state.js.publish(
+            "d.signals.v1",
+            json.dumps(signal_payload).encode("utf-8"),
+        )
+
+        # Persist to database
+        async with app.state.db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO consensus_signals (
+                    id, symbol, direction, entry_price, stop_price,
+                    n_traders, n_agreeing, eff_k, dispersion,
+                    p_win, ev_gross_r, ev_cost_r, ev_net_r,
+                    latency_ms, median_voter_price, mid_delta_bps,
+                    trigger_addresses, created_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                    $10, $11, $12, $13, $14, $15, $16, $17, $18
+                )
+                ON CONFLICT (id) DO NOTHING
+                """,
+                signal.id,
+                signal.symbol,
+                signal.direction,
+                signal.entry_price,
+                signal.stop_price,
+                signal.n_traders,
+                signal.n_agreeing,
+                signal.eff_k,
+                signal.dispersion,
+                signal.p_win,
+                signal.ev_gross_r,
+                signal.ev_cost_r,
+                signal.ev_net_r,
+                signal.latency_ms,
+                signal.median_voter_price,
+                signal.mid_delta_bps,
+                signal.trigger_addresses,
+                signal.created_at,
+            )
+
+    except Exception as e:
+        print(f"[hl-decide] Failed to handle consensus signal: {e}")
 
 
 @app.on_event("startup")
@@ -480,12 +643,21 @@ async def startup():
         score_count, fill_count = await restore_state()
         print(f"[hl-decide] Restored {score_count} scores and {fill_count} fills from database")
 
+        # Count open positions
+        async with app.state.db.acquire() as conn:
+            open_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM position_signals WHERE status = 'open'"
+            )
+            print(f"[hl-decide] {open_count} open positions being tracked")
+
         # Connect to NATS
         app.state.nc = await nats.connect(NATS_URL)
         app.state.js = app.state.nc.jetstream()
         await ensure_stream(app.state.js, "HL_D", ["d.signals.v1", "d.outcomes.v1"])
         await app.state.nc.subscribe("b.scores.v1", cb=handle_score)
         await app.state.nc.subscribe("c.fills.v1", cb=handle_fill)
+
+        print("[hl-decide] Started with position-based tracking")
     except Exception as e:
         print(f"[hl-decide] Fatal startup error: {e}")
         raise
@@ -501,9 +673,186 @@ async def shutdown():
 
 @app.get("/healthz")
 async def health():
-    return {"status": "ok", "scores": len(scores), "fills": len(fills)}
+    """Health check endpoint."""
+    try:
+        async with app.state.db.acquire() as conn:
+            open_positions = await conn.fetchval(
+                "SELECT COUNT(*) FROM position_signals WHERE status = 'open'"
+            )
+        return {
+            "status": "ok",
+            "scores": len(scores),
+            "fills": len(fills),
+            "open_positions": open_positions,
+        }
+    except Exception:
+        return {"status": "ok", "scores": len(scores), "fills": len(fills)}
 
 
 @app.get("/metrics")
 async def metrics():
+    """Prometheus metrics endpoint."""
     return Response(content=generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/positions/open")
+async def get_open_positions():
+    """Get all currently open positions being tracked."""
+    try:
+        async with app.state.db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT address, asset, direction, entry_price, entry_size, entry_ts
+                FROM position_signals
+                WHERE status = 'open'
+                ORDER BY entry_ts DESC
+                LIMIT 100
+                """
+            )
+            return {
+                "count": len(rows),
+                "positions": [
+                    {
+                        "address": row["address"],
+                        "asset": row["asset"],
+                        "direction": row["direction"],
+                        "entry_price": float(row["entry_price"]),
+                        "entry_size": float(row["entry_size"]),
+                        "entry_ts": row["entry_ts"].isoformat(),
+                    }
+                    for row in rows
+                ]
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/positions/recent")
+async def get_recent_closed_positions():
+    """Get recently closed positions with their R-multiples."""
+    try:
+        async with app.state.db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT address, asset, direction, entry_price, exit_price,
+                       result_r, realized_pnl, entry_ts, exit_ts
+                FROM position_signals
+                WHERE status = 'closed'
+                ORDER BY exit_ts DESC
+                LIMIT 50
+                """
+            )
+            return {
+                "count": len(rows),
+                "positions": [
+                    {
+                        "address": row["address"],
+                        "asset": row["asset"],
+                        "direction": row["direction"],
+                        "entry_price": float(row["entry_price"]),
+                        "exit_price": float(row["exit_price"]) if row["exit_price"] else None,
+                        "result_r": float(row["result_r"]) if row["result_r"] else None,
+                        "realized_pnl": float(row["realized_pnl"]) if row["realized_pnl"] else None,
+                        "entry_ts": row["entry_ts"].isoformat(),
+                        "exit_ts": row["exit_ts"].isoformat() if row["exit_ts"] else None,
+                    }
+                    for row in rows
+                ]
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# =====================
+# Consensus Signal API
+# =====================
+
+
+@app.get("/consensus/signals")
+async def get_consensus_signals(limit: int = 20):
+    """
+    Get recent consensus signals for the Alpha Pool tab.
+
+    Returns signals with their metrics and outcomes.
+    """
+    try:
+        async with app.state.db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, symbol, direction, entry_price, stop_price,
+                       n_traders, n_agreeing, eff_k, dispersion,
+                       p_win, ev_gross_r, ev_cost_r, ev_net_r,
+                       latency_ms, median_voter_price, mid_delta_bps,
+                       trigger_addresses, created_at,
+                       outcome, exit_price, result_r, closed_at
+                FROM consensus_signals
+                ORDER BY created_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+            return {
+                "count": len(rows),
+                "signals": [
+                    {
+                        "id": str(row["id"]),
+                        "symbol": row["symbol"],
+                        "direction": row["direction"],
+                        "entry_price": float(row["entry_price"]),
+                        "stop_price": float(row["stop_price"]) if row["stop_price"] else None,
+                        "n_traders": row["n_traders"],
+                        "n_agreeing": row["n_agreeing"],
+                        "eff_k": float(row["eff_k"]),
+                        "dispersion": float(row["dispersion"]) if row["dispersion"] else None,
+                        "p_win": float(row["p_win"]),
+                        "ev_gross_r": float(row["ev_gross_r"]),
+                        "ev_cost_r": float(row["ev_cost_r"]),
+                        "ev_net_r": float(row["ev_net_r"]),
+                        "latency_ms": row["latency_ms"],
+                        "created_at": row["created_at"].isoformat(),
+                        "outcome": row["outcome"],
+                        "exit_price": float(row["exit_price"]) if row["exit_price"] else None,
+                        "result_r": float(row["result_r"]) if row["result_r"] else None,
+                        "closed_at": row["closed_at"].isoformat() if row["closed_at"] else None,
+                    }
+                    for row in rows
+                ]
+            }
+    except Exception as e:
+        return {"error": str(e), "count": 0, "signals": []}
+
+
+@app.get("/consensus/stats")
+async def get_consensus_stats():
+    """
+    Get aggregate statistics for consensus signals.
+    """
+    try:
+        async with app.state.db.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*) as total_signals,
+                    COUNT(*) FILTER (WHERE outcome = 'win') as wins,
+                    COUNT(*) FILTER (WHERE outcome = 'loss') as losses,
+                    COUNT(*) FILTER (WHERE outcome IS NOT NULL) as closed,
+                    AVG(eff_k) as avg_eff_k,
+                    AVG(ev_net_r) as avg_ev_net_r,
+                    AVG(result_r) FILTER (WHERE outcome IS NOT NULL) as avg_result_r
+                FROM consensus_signals
+                """
+            )
+            win_rate = (row["wins"] / row["closed"] * 100) if row["closed"] > 0 else 0
+
+            return {
+                "total_signals": row["total_signals"],
+                "closed": row["closed"],
+                "wins": row["wins"],
+                "losses": row["losses"],
+                "win_rate": round(win_rate, 1),
+                "avg_eff_k": round(float(row["avg_eff_k"] or 0), 2),
+                "avg_ev_net_r": round(float(row["avg_ev_net_r"] or 0), 3),
+                "avg_result_r": round(float(row["avg_result_r"] or 0), 3),
+            }
+    except Exception as e:
+        return {"error": str(e)}

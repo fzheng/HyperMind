@@ -2,13 +2,13 @@
 
 ## General
 
-### What is HyperMind?
+### What is SigmaPilot?
 
-HyperMind is a collective intelligence trading system that monitors top traders on Hyperliquid and generates consensus-based trading signals. Instead of copy-trading a single wallet, it aggregates patterns from multiple top performers.
+SigmaPilot is a collective intelligence trading system that monitors top traders on Hyperliquid and generates consensus-based trading signals. Instead of copy-trading a single wallet, it aggregates patterns from multiple top performers.
 
 ### Is this financial advice?
 
-No. HyperMind is an experimental research tool. All signals are for informational purposes only. Always do your own research before making trading decisions.
+No. SigmaPilot is an experimental research tool. All signals are for informational purposes only. Always do your own research before making trading decisions.
 
 ### Which assets are supported?
 
@@ -18,7 +18,7 @@ Currently BTC and ETH perpetual contracts on Hyperliquid.
 
 ## Setup
 
-### How do I start HyperMind?
+### How do I start SigmaPilot?
 
 ```bash
 npm install

@@ -128,6 +128,25 @@ describe('getOwnerToken', () => {
     // Should only warn once
     expect(console.warn).toHaveBeenCalledTimes(1);
   });
+
+  it('throws in production when using default token', () => {
+    delete process.env.OWNER_TOKEN;
+    process.env.NODE_ENV = 'production';
+    const { getOwnerToken } = require('../packages/ts-lib/src/env');
+
+    expect(() => getOwnerToken()).toThrow('OWNER_TOKEN must be explicitly set in production');
+  });
+
+  it('returns custom token in production without error', () => {
+    process.env.OWNER_TOKEN = 'prod-secure-token';
+    process.env.NODE_ENV = 'production';
+    const { getOwnerToken } = require('../packages/ts-lib/src/env');
+
+    const token = getOwnerToken();
+
+    expect(token).toBe('prod-secure-token');
+    expect(console.warn).not.toHaveBeenCalled();
+  });
 });
 
 describe('getPort', () => {

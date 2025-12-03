@@ -579,6 +579,60 @@ async function main() {
   });
   app.get('/dashboard/api/leaderboard/refresh-status', (req, res) => proxyScout('/leaderboard/refresh-status', req, res));
 
+  // Bandit API proxy routes (hl-sage)
+  const sageUrl = process.env.SAGE_URL || 'http://hl-sage:8080';
+
+  async function proxySage(pathname: string, req: Request, res: Response) {
+    try {
+      const target = new URL(pathname, sageUrl);
+      const idx = req.originalUrl.indexOf('?');
+      if (idx >= 0) {
+        target.search = req.originalUrl.slice(idx);
+      }
+      const response = await fetch(target, { headers: { 'x-owner-key': OWNER_TOKEN } });
+      const body = await response.text();
+      const type = response.headers.get('content-type') || 'application/json';
+      res.status(response.status).setHeader('Content-Type', type).send(body);
+    } catch (err: any) {
+      logger.error('sage_proxy_failed', { pathname, err: err?.message });
+      res.status(502).json({ error: 'proxy_failed' });
+    }
+  }
+
+  app.get('/dashboard/api/bandit/status', (req, res) => proxySage('/bandit/status', req, res));
+  app.get('/dashboard/api/bandit/posteriors', (req, res) => proxySage('/bandit/posteriors', req, res));
+  app.get('/dashboard/api/bandit/select', (req, res) => proxySage('/bandit/select', req, res));
+  app.post('/dashboard/api/bandit/sample', (req, res) => proxySage('/bandit/sample', req, res));
+  app.post('/dashboard/api/bandit/decay', (req, res) => proxySage('/bandit/decay', req, res));
+
+  // Alpha Pool API routes (NIG-based Thompson Sampling)
+  app.get('/dashboard/api/alpha-pool', (req, res) => proxySage('/alpha-pool', req, res));
+  app.get('/dashboard/api/alpha-pool/status', (req, res) => proxySage('/alpha-pool/status', req, res));
+  app.post('/dashboard/api/alpha-pool/sample', (req, res) => proxySage('/alpha-pool/sample', req, res));
+
+  // Consensus signal API routes (hl-decide)
+  const decideUrl = process.env.DECIDE_URL || 'http://hl-decide:8080';
+
+  async function proxyDecide(pathname: string, req: Request, res: Response) {
+    try {
+      const target = new URL(pathname, decideUrl);
+      const idx = req.originalUrl.indexOf('?');
+      if (idx >= 0) {
+        target.search = req.originalUrl.slice(idx);
+      }
+      const response = await fetch(target, { headers: { 'x-owner-key': OWNER_TOKEN } });
+      const body = await response.text();
+      const type = response.headers.get('content-type') || 'application/json';
+      res.status(response.status).setHeader('Content-Type', type).send(body);
+    } catch (err: any) {
+      logger.error('decide_proxy_failed', { pathname, err: err?.message });
+      res.status(502).json({ error: 'proxy_failed' });
+    }
+  }
+
+  app.get('/dashboard/api/consensus/signals', (req, res) => proxyDecide('/consensus/signals', req, res));
+  app.get('/dashboard/api/consensus/stats', (req, res) => proxyDecide('/consensus/stats', req, res));
+
   // Backfill fills endpoint for infinite scroll
   app.get('/dashboard/api/fills/backfill', async (req, res) => {
     // Prevent browser caching - each request may return different data

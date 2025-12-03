@@ -51,7 +51,7 @@ services:
       dockerfile: services/hl-scout/Dockerfile
     restart: unless-stopped
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${NODE_ENV:-development}
       PORT: 8080
       OWNER_TOKEN: ${OWNER_TOKEN:-dev-owner}
       DATABASE_URL: ${DATABASE_URL:-postgresql://hlbot:hlbotpassword@postgres:5432/hlbot}
@@ -78,7 +78,7 @@ services:
       dockerfile: services/hl-stream/Dockerfile
     restart: unless-stopped
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${NODE_ENV:-development}
       PORT: 8080
       OWNER_TOKEN: ${OWNER_TOKEN:-dev-owner}
       NATS_URL: nats://nats:4222

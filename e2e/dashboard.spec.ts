@@ -13,7 +13,7 @@ test.describe('Dashboard Page - Core Layout', () => {
   });
 
   test('should load dashboard page with correct title', async ({ page }) => {
-    await expect(page).toHaveTitle(/HyperMind|Dashboard/i);
+    await expect(page).toHaveTitle(/SigmaPilot|Dashboard/i);
   });
 
   test('should display main content area', async ({ page }) => {
@@ -25,7 +25,7 @@ test.describe('Dashboard Page - Core Layout', () => {
     await expect(header).toBeVisible();
 
     const brandName = page.locator('[data-testid="brand-name"], .brand-name');
-    await expect(brandName).toContainText('HyperMind');
+    await expect(brandName).toContainText('SigmaPilot');
   });
 
   test('should display live clock', async ({ page }) => {

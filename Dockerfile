@@ -1,4 +1,4 @@
-# Multi-stage Dockerfile for HyperMind (Node.js + TypeScript)
+# Multi-stage Dockerfile for SigmaPilot (Node.js + TypeScript)
 
 FROM node:20-alpine AS deps
 WORKDIR /app
