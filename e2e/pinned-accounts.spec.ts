@@ -17,8 +17,12 @@ const TEST_ADDRESS = '0x1234567890123456789012345678901234567890';
 test.describe('Pinned Accounts - UI Elements', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/dashboard');
+    // Switch to Legacy Leaderboard tab where pinned accounts UI exists
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
+    await page.waitForTimeout(500);
     // Wait for leaderboard to load
-    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr, .leaderboard-table tbody tr', { timeout: 15000 }).catch(() => {});
+    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr', { timeout: 15000 }).catch(() => {});
   });
 
   test('should display add custom input', async ({ page }) => {
@@ -41,7 +45,7 @@ test.describe('Pinned Accounts - UI Elements', () => {
   });
 
   test('should display pin icons in leaderboard rows', async ({ page }) => {
-    const rows = page.locator('[data-testid="leaderboard-table"] tbody tr, .leaderboard-table tbody tr');
+    const rows = page.locator('[data-testid="leaderboard-table"] tbody tr');
     const rowCount = await rows.count();
 
     if (rowCount > 0) {
@@ -56,7 +60,11 @@ test.describe('Pinned Accounts - UI Elements', () => {
 test.describe('Pinned Accounts - Pin Icon Styling (Read-Only)', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/dashboard');
-    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr, .leaderboard-table tbody tr', { timeout: 15000 }).catch(() => {});
+    // Switch to Legacy Leaderboard tab
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
+    await page.waitForTimeout(500);
+    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr', { timeout: 15000 }).catch(() => {});
   });
 
   test('pin icons should have pointer cursor', async ({ page }) => {
@@ -121,7 +129,11 @@ test.describe('Pinned Accounts - Pin Icon Styling (Read-Only)', () => {
 test.describe('Pinned Accounts - Visual Differentiation (Read-Only)', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/dashboard');
-    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr, .leaderboard-table tbody tr', { timeout: 15000 }).catch(() => {});
+    // Switch to Legacy Leaderboard tab
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
+    await page.waitForTimeout(500);
+    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr', { timeout: 15000 }).catch(() => {});
   });
 
   test('pinned rows should have distinct background', async ({ page }) => {
@@ -156,6 +168,10 @@ test.describe('Pinned Accounts - Custom Address Input Validation (Mocked)', () =
     });
 
     await page.goto('/dashboard');
+    // Switch to Legacy Leaderboard tab
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
+    await page.waitForTimeout(500);
   });
 
   test('input should accept valid ethereum address', async ({ page }) => {
@@ -216,7 +232,11 @@ test.describe('Pinned Accounts - Pin/Unpin Interactions (Mocked API)', () => {
     });
 
     await page.goto('/dashboard');
-    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr, .leaderboard-table tbody tr', { timeout: 15000 }).catch(() => {});
+    // Switch to Legacy Leaderboard tab
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
+    await page.waitForTimeout(500);
+    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr', { timeout: 15000 }).catch(() => {});
 
     const unpinnedIcon = page.locator('.pin-icon.unpinned').first();
 
@@ -271,6 +291,9 @@ test.describe('Pinned Accounts - Pin/Unpin Interactions (Mocked API)', () => {
     });
 
     await page.goto('/dashboard');
+    // Switch to Legacy Leaderboard tab
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
     await page.waitForTimeout(500);
 
     const input = page.locator('[data-testid="custom-address-input"], #custom-address-input');
@@ -296,6 +319,10 @@ test.describe('Pinned Accounts - Pin/Unpin Interactions (Mocked API)', () => {
 test.describe('Pinned Accounts - Limit Enforcement', () => {
   test('should show max custom limit indicator', async ({ page }) => {
     await page.goto('/dashboard');
+    // Switch to Legacy Leaderboard tab
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
+    await page.waitForTimeout(500);
 
     // Look for the (X/3) indicator in header
     const limitText = page.locator('text=/\\(\\d\\/3\\)/');
@@ -306,9 +333,13 @@ test.describe('Pinned Accounts - Limit Enforcement', () => {
 test.describe('Pinned Accounts - Persistence (Read-Only)', () => {
   test('pinned accounts should persist after page reload', async ({ page }) => {
     await page.goto('/dashboard');
+    // Switch to Legacy Leaderboard tab
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
+    await page.waitForTimeout(500);
 
     // Wait for leaderboard to fully load
-    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr, .leaderboard-table tbody tr', { timeout: 15000 }).catch(() => {});
+    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr', { timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(2000); // Wait longer for data to stabilize
 
     // Count pinned items before reload (read-only observation)
@@ -316,9 +347,12 @@ test.describe('Pinned Accounts - Persistence (Read-Only)', () => {
 
     // Reload page
     await page.reload();
+    // Switch to Legacy Leaderboard tab again
+    await page.locator('[data-testid="tab-legacy-leaderboard"]').click();
+    await page.waitForTimeout(500);
 
     // Wait for leaderboard to fully load again
-    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr, .leaderboard-table tbody tr', { timeout: 15000 }).catch(() => {});
+    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr', { timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(2000); // Wait longer for data to stabilize
 
     // Count pinned items after reload

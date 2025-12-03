@@ -21,17 +21,21 @@ test.describe('Dashboard - API Error Handling', () => {
     });
 
     await page.goto('/dashboard');
+    // Switch to Legacy Leaderboard tab
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
+    await page.waitForTimeout(500);
 
     // Dashboard should still load
     await expect(page.locator('main')).toBeVisible();
     await expect(page.locator('[data-testid="header"], header')).toBeVisible();
 
     // Leaderboard table should exist but may be empty
-    const table = page.locator('[data-testid="leaderboard-table"], .leaderboard-table');
+    const table = page.locator('[data-testid="leaderboard-table"]');
     await expect(table).toBeVisible();
   });
 
-  test('should handle fills API 500 error gracefully', async ({ page }) => {
+  test('should handle fills API 500 error gracefully', async ({ page, isMobile }) => {
     // Mock fills API to return 500
     await page.route('**/dashboard/fills**', async (route) => {
       await route.fulfill({
@@ -46,9 +50,14 @@ test.describe('Dashboard - API Error Handling', () => {
     // Dashboard should still load
     await expect(page.locator('main')).toBeVisible();
 
-    // Fills table should exist
-    const fillsTable = page.locator('[data-testid="fills-table"], .fills-table');
-    await expect(fillsTable).toBeVisible();
+    // Alpha Pool fills table should exist (visible by default)
+    const fillsTable = page.locator('[data-testid="alpha-fills-table"]');
+    // On mobile, the table layout is different - just check it's attached
+    if (isMobile) {
+      await expect(fillsTable).toBeAttached();
+    } else {
+      await expect(fillsTable).toBeVisible();
+    }
   });
 
   test('should handle price API 502 error gracefully', async ({ page }) => {
@@ -97,19 +106,23 @@ test.describe('Dashboard - Empty Data States', () => {
     });
 
     await page.goto('/dashboard');
+    // Switch to Legacy Leaderboard tab
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
+    await page.waitForTimeout(500);
 
     // Dashboard should still load
     await expect(page.locator('main')).toBeVisible();
 
     // Table should exist with headers
-    const table = page.locator('[data-testid="leaderboard-table"], .leaderboard-table');
+    const table = page.locator('[data-testid="leaderboard-table"]');
     await expect(table).toBeVisible();
 
     // Wait for table to render
     await page.waitForTimeout(500);
 
     // Table body should be empty or show placeholder row
-    const rows = page.locator('[data-testid="leaderboard-tbody"] tr, .leaderboard-table tbody tr');
+    const rows = page.locator('[data-testid="leaderboard-tbody"] tr');
     const rowCount = await rows.count();
     // May have 0 rows or 1 placeholder row
     expect(rowCount).toBeLessThanOrEqual(1);
@@ -126,6 +139,10 @@ test.describe('Dashboard - Empty Data States', () => {
     });
 
     await page.goto('/dashboard');
+    // Switch to Legacy Leaderboard tab for fills-status-message
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
+    await page.waitForTimeout(500);
 
     // Status message should show waiting state
     const statusMessage = page.locator('[data-testid="fills-status-message"], #fills-status-message');
@@ -172,12 +189,16 @@ test.describe('Dashboard - Pin API Error Handling (Mocked)', () => {
     });
 
     await page.goto('/dashboard');
+    // Switch to Legacy Leaderboard tab
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
+    await page.waitForTimeout(500);
 
     // Dashboard should still work
     await expect(page.locator('main')).toBeVisible();
 
     // Pin icons should still be visible (even if clicking won't work)
-    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr, .leaderboard-table tbody tr', { timeout: 10000 }).catch(() => {});
+    await page.waitForSelector('[data-testid="leaderboard-table"] tbody tr', { timeout: 10000 }).catch(() => {});
   });
 
   test('should handle add custom account API 400 bad request', async ({ page }) => {
@@ -209,6 +230,10 @@ test.describe('Dashboard - Pin API Error Handling (Mocked)', () => {
     });
 
     await page.goto('/dashboard');
+    // Switch to Legacy Leaderboard tab
+    const legacyTab = page.locator('[data-testid="tab-legacy-leaderboard"]');
+    await legacyTab.click();
+    await page.waitForTimeout(500);
 
     const input = page.locator('[data-testid="custom-address-input"], #custom-address-input');
     const addButton = page.locator('[data-testid="add-custom-btn"], #add-custom-btn');
@@ -254,7 +279,7 @@ test.describe('Dashboard - Pin API Error Handling (Mocked)', () => {
 });
 
 test.describe('Dashboard - WebSocket Error States', () => {
-  test('should handle WebSocket connection failure', async ({ page }) => {
+  test('should handle WebSocket connection failure', async ({ page, isMobile }) => {
     // Block WebSocket connections
     await page.route('**/ws', async (route) => {
       await route.abort('connectionrefused');
@@ -266,9 +291,14 @@ test.describe('Dashboard - WebSocket Error States', () => {
     await expect(page.locator('main')).toBeVisible();
     await expect(page.locator('[data-testid="header"], header')).toBeVisible();
 
-    // Fills table should still be visible
-    const fillsTable = page.locator('[data-testid="fills-table"], .fills-table');
-    await expect(fillsTable).toBeVisible();
+    // Alpha Pool fills table should still be visible (visible by default)
+    const fillsTable = page.locator('[data-testid="alpha-fills-table"]');
+    // On mobile, the table layout is different - just check it's attached
+    if (isMobile) {
+      await expect(fillsTable).toBeAttached();
+    } else {
+      await expect(fillsTable).toBeVisible();
+    }
   });
 });
 
@@ -289,13 +319,13 @@ test.describe('Dashboard - Mixed Error Scenarios', () => {
     await expect(page.locator('main')).toBeVisible();
     await expect(page.locator('[data-testid="header"], header')).toBeVisible();
 
-    // All cards should still be present (just empty)
-    const leaderboardCard = page.locator('[data-testid="leaderboard-card"], .leaderboard-card');
-    const fillsCard = page.locator('[data-testid="fills-card"], .fills-card');
-    const chartCard = page.locator('[data-testid="chart-card"], .chart-card');
+    // Alpha Pool cards should still be present (visible by default)
+    const alphaPoolCard = page.locator('[data-testid="alpha-pool-card"]');
+    const alphaFillsCard = page.locator('[data-testid="alpha-fills-card"]');
+    const chartCard = page.locator('[data-testid="chart-card"]');
 
-    await expect(leaderboardCard).toBeVisible();
-    await expect(fillsCard).toBeVisible();
+    await expect(alphaPoolCard).toBeVisible();
+    await expect(alphaFillsCard).toBeVisible();
     await expect(chartCard).toBeVisible();
   });
 
