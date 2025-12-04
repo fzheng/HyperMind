@@ -402,33 +402,46 @@ The following gaps exist between the documented design and current implementatio
 **Current**: `hl-sage/main.py` (lines 248-253) ranks traders by `nig_m * side` (posterior mean).
 **Designed**: Thompson Sampling should sample from posterior and rank by sampled values.
 **Impact**: No exploration of uncertain traders; system exploits only proven performers.
-**Fix**: Invoke `thompson_sample_select_nig()` from `bandit.py` instead of sorting by posterior mean.
+**Fix**: Invoke `thompson_sample_select_nig()` from `bandit.py` in score emission pipeline, not just admin endpoints.
 
 #### Gap 2: Consensus Gates Use Placeholder Risk Inputs
-**Current**: `consensus.py` (lines 244-250) uses hardcoded 1% stop distance.
+**Current**: `consensus.py` (lines 244-250) uses hardcoded 1% stop distance and implicit ATR percentile of 0.5.
 **Designed**: Stop distance should be ATR-based, adjusting to market volatility.
 **Impact**: EV gate and price drift calculations are constant regardless of market regime.
-**Fix**: Add ATR feed (from price history or external API) and use for dynamic stop sizing.
+**Fix**: Add ATR feed (from `marks_1m` price history or external API) and use for dynamic stop sizing.
 
 #### Gap 3: Correlation Matrix Not Populated
 **Current**: `ConsensusDetector.correlation_matrix` is initialized empty and never populated.
 **Designed**: Daily job should compute pairwise correlations and store in `trader_corr` table.
-**Impact**: `eff_k` defaults to shrinkage toward `ρ_base=0.3` for all pairs; correlation gate is ineffective.
-**Fix**: Implement daily correlation job (Phase 3b task 3.5).
+**Impact**: `eff_k` always falls back to default `ρ_base=0.3` for all pairs; correlation gate is ineffective.
+**Fix**: Implement daily correlation job (Phase 3b task 3.5) and hydrate detector on startup.
 
-#### Gap 4: E2E Tests Don't Start App Automatically
-**Current**: `playwright.config.ts` has `webServer` commented out; tests require manual dashboard start.
-**Designed**: Tests should be self-contained with automatic app startup.
-**Impact**: CI/CD may fail if dashboard not pre-started; local dev requires manual steps.
-**Fix**: Uncomment webServer config or document the dependency clearly.
+#### Gap 4: ScoreEvent Weight Uses Legacy Leaderboard Value
+**Current**: `hl-sage/main.py` (line 263) emits `weight=state["weight"]` from leaderboard, even when score is NIG-based.
+**Designed**: Weight should reflect NIG confidence (e.g., derived from posterior variance or κ).
+**Impact**: Downstream consumers may interpret weight as confidence, but it's the legacy leaderboard weight.
+**Fix**: Derive weight from posterior (e.g., `1/sqrt(variance)` or `κ/(κ+10)`) or document that it's legacy.
+
+#### Gap 5: E2E Tests Fragile and Require Manual Setup
+**Current**: `playwright.config.ts` has `webServer` commented out; specs use loose selectors and don't assert backend effects.
+**Designed**: Tests should be self-contained with automatic app startup and verify state changes.
+**Impact**: CI/CD may fail if dashboard not pre-started; tests may pass without verifying functionality.
+**Fix**: Enable webServer config, add `data-testid` selectors, assert backend responses for pin/unpin operations.
+
+#### Gap 6: CI Runs Unit Tests Only, Not E2E
+**Current**: CI workflow runs `npm run test:coverage` (Jest unit tests). Quant tests ARE included.
+**Note**: E2E tests (Playwright) are NOT run in CI - they require a running dashboard.
+**Impact**: UI regressions won't be caught in CI; only unit-level algorithm tests run.
+**Fix**: Add Docker-based E2E stage to CI or document that E2E is manual-only.
 
 ### Remaining Integration Tasks (Phase 3b)
 
 #### 3.4 Thompson Sampling for Candidate Selection
 - [ ] Replace posterior-mean ranking with actual Thompson Sampling
-- [ ] Invoke `thompson_sample_select_nig()` in hl-sage score emission
+- [ ] Invoke `thompson_sample_select_nig()` in hl-sage score emission pipeline (not just admin endpoints)
 - [ ] Configure exploration_ratio for new trader discovery
 - [ ] Add uncertainty bonus for traders with low κ (few observations)
+- [ ] Derive ScoreEvent.weight from posterior (e.g., `κ/(κ+10)`) instead of legacy leaderboard weight
 
 #### 3.5 Daily Correlation Job
 - [ ] Compute 5-minute bucket sign vectors per trader
@@ -657,7 +670,7 @@ Self code review verified the following runtime integrations:
 3. **Run services**: `docker compose up -d`
 4. **Dashboard**: http://localhost:4102/dashboard (Alpha Pool tab is default)
 5. **Logs**: `docker compose logs -f [service-name]`
-6. **Run tests**: `npm test` (953+ unit tests + 128 E2E tests)
+6. **Run tests**: `npm test` (955 unit tests); E2E requires dashboard running first
 
 ### Key Files by Phase
 
@@ -689,9 +702,14 @@ Self code review verified the following runtime integrations:
 - `db/migrations/019_consensus_signals.sql` - Consensus signals table
 
 **Phase 3b (In Progress - Remaining)**:
+- Replace posterior-mean selection with Thompson Sampling in score emission
+- Derive ScoreEvent.weight from NIG posterior (not legacy leaderboard weight)
 - Implement daily correlation computation job
+- Hydrate ConsensusDetector.correlation_matrix from trader_corr table
+- Replace hardcoded 1% stop with ATR-based dynamic stops
 - Wire episode builder to hl-decide for episode-based votes
 - Weight votes by position conviction
+- Improve E2E test reliability (data-testid selectors, backend assertions)
 
 ---
 
