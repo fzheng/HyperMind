@@ -162,6 +162,9 @@ Wired the algorithm components into the runtime and created the Alpha Pool UI:
 - [x] **Security**: OWNER_TOKEN fails-fast in production (NODE_ENV=production)
 - [x] **Alpha Pool Decoupling**: Fully separated from legacy leaderboard system
 - [x] **Dashboard UI Fixes**: Fixed tracked traders panel column width truncation (TRADES header)
+- [x] **HFT Detection Improvement**: Replaced VLM/AV ratio with orders-per-day via fill history analysis
+- [x] **PnL Curve Caching**: 24-hour cache for Alpha Pool PnL curves to reduce API calls
+- [x] **Alpha Pool Activity**: Live fills filtered to pool traders only
 
 **Alpha Pool Architecture (Decoupled)**:
 The Alpha Pool is now a completely independent system from the legacy leaderboard:
@@ -513,11 +516,11 @@ CONSENSUS_MIN_EFFECTIVE_K=2.0
 CONSENSUS_EV_MIN_R=0.20
 
 # Alpha Pool Quality Filters
-ALPHA_POOL_MIN_PNL=1000              # Min $1k 30d PnL
-ALPHA_POOL_MIN_ROI=0.01              # Min 1% 30d ROI
-ALPHA_POOL_MAX_VLM_RATIO=500         # Max 500x volume/AV (filter HFT)
-ALPHA_POOL_MIN_ACCOUNT_VALUE=10000   # Min $10k account value
-ALPHA_POOL_MIN_WEEK_VLM=1000         # Min $1k weekly volume (filter inactive)
+ALPHA_POOL_MIN_PNL=10000             # Min $10k 30d PnL
+ALPHA_POOL_MIN_ROI=0.10              # Min 10% 30d ROI
+ALPHA_POOL_MIN_ACCOUNT_VALUE=100000  # Min $100k account value
+ALPHA_POOL_MIN_WEEK_VLM=10000        # Min $10k weekly volume (filter inactive)
+ALPHA_POOL_MAX_ORDERS_PER_DAY=100    # Max 100 orders/day (filter HFT via fill history)
 ```
 
 ---
@@ -602,7 +605,7 @@ Self code review verified the following runtime integrations:
 | Fill Processing | `main.py:510-543` | `process_fill_for_consensus()` | ✅ Verified |
 
 **Test Results**:
-- Jest: 953 tests passing
+- Jest: 955 tests passing (includes 8 new HFT filter tests)
 - Playwright E2E: 128 tests passing (6 skipped)
 
 **Files Staged**: 14 new files + modified services ready for commit.
