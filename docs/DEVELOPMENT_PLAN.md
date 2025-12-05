@@ -165,6 +165,9 @@ Wired the algorithm components into the runtime and created the Alpha Pool UI:
 - [x] **HFT Detection Improvement**: Replaced VLM/AV ratio with orders-per-day via fill history analysis
 - [x] **PnL Curve Caching**: 24-hour cache for Alpha Pool PnL curves to reduce API calls
 - [x] **Alpha Pool Activity**: Live fills filtered to pool traders only
+- [x] **Auto-Refresh on Startup**: Alpha Pool auto-populates on first deployment (when DB empty)
+- [x] **API Retry Logic**: Exponential backoff for Hyperliquid API rate limits and timeouts
+- [x] **Cloud Deployment**: Render Blueprint with service orchestration and health checks
 
 **⚠️ Note**: Phase 3a provides the infrastructure but with placeholder implementations. See "Known Implementation Gaps" below for details on what needs to be completed in Phase 3b.
 
