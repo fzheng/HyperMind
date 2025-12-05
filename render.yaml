@@ -37,12 +37,13 @@ services:
         fromDatabase:
           name: hlbot-db
           property: connectionString
-      - key: NATS_URL
+      - key: NATS_HOST
         fromService:
           type: web
           name: nats
-          property: hostport
-          envVarKey: NATS_URL
+          property: host
+      - key: NATS_URL
+        value: nats://$(NATS_HOST):4222
       - key: OWNER_TOKEN
         sync: false  # Set manually in dashboard
 
@@ -64,18 +65,20 @@ services:
         fromDatabase:
           name: hlbot-db
           property: connectionString
-      - key: NATS_URL
+      - key: NATS_HOST
         fromService:
           type: web
           name: nats
-          property: hostport
-          envVarKey: NATS_URL
-      - key: SCOUT_URL
+          property: host
+      - key: NATS_URL
+        value: nats://$(NATS_HOST):4222
+      - key: SCOUT_HOST
         fromService:
           type: web
           name: hl-scout
-          property: hostport
-          envVarKey: SCOUT_URL
+          property: host
+      - key: SCOUT_URL
+        value: http://$(SCOUT_HOST):8080
       - key: OWNER_TOKEN
         sync: false
 
@@ -95,12 +98,13 @@ services:
         fromDatabase:
           name: hlbot-db
           property: connectionString
-      - key: NATS_URL
+      - key: NATS_HOST
         fromService:
           type: web
           name: nats
-          property: hostport
-          envVarKey: NATS_URL
+          property: host
+      - key: NATS_URL
+        value: nats://$(NATS_HOST):4222
       - key: OWNER_TOKEN
         sync: false
 
@@ -120,11 +124,12 @@ services:
         fromDatabase:
           name: hlbot-db
           property: connectionString
-      - key: NATS_URL
+      - key: NATS_HOST
         fromService:
           type: web
           name: nats
-          property: hostport
-          envVarKey: NATS_URL
+          property: host
+      - key: NATS_URL
+        value: nats://$(NATS_HOST):4222
       - key: OWNER_TOKEN
         sync: false
