@@ -948,7 +948,11 @@ ALPHA_POOL_MAX_ORDERS_PER_DAY = float(os.getenv("ALPHA_POOL_MAX_ORDERS_PER_DAY",
 ALPHA_POOL_REFRESH_HOURS = int(os.getenv("ALPHA_POOL_REFRESH_HOURS", "24"))  # Refresh interval in hours (default 24h)
 
 
-async def analyze_user_fills(client: httpx.AsyncClient, address: str) -> Dict[str, Any]:
+async def analyze_user_fills(
+    client: httpx.AsyncClient,
+    address: str,
+    max_retries: int = 2,
+) -> Dict[str, Any]:
     """
     Analyze user's fill history for HFT detection and BTC/ETH trading.
 
@@ -956,59 +960,81 @@ async def analyze_user_fills(client: httpx.AsyncClient, address: str) -> Dict[st
     - orders_per_day: HFT detection (> 100 orders/day = HFT)
     - has_btc_eth: Whether trader has BTC or ETH fills
 
-    Returns dict with analysis results, or None on error.
+    Returns dict with analysis results, or None on error after retries.
     """
-    try:
-        response = await client.post(
-            HYPERLIQUID_INFO_URL,
-            json={"type": "userFills", "user": address.lower()},
-            timeout=10.0,
-        )
-        if response.status_code != 200:
-            return None
+    for attempt in range(max_retries + 1):
+        try:
+            response = await client.post(
+                HYPERLIQUID_INFO_URL,
+                json={"type": "userFills", "user": address.lower()},
+                timeout=15.0,  # Increased timeout
+            )
 
-        fills = response.json()
-        if not isinstance(fills, list):
-            return None
+            # Handle rate limiting with retry
+            if response.status_code == 429:
+                if attempt < max_retries:
+                    delay = (attempt + 1) * 2.0
+                    print(f"[hl-sage] Rate limited on fills for {address}, retry {attempt + 1} in {delay}s")
+                    await asyncio.sleep(delay)
+                    continue
+                return None
 
-        result = {
-            "orders_per_day": 0.0,
-            "has_btc_eth": False,
-            "fill_count": len(fills),
-        }
+            if response.status_code != 200:
+                if attempt < max_retries:
+                    await asyncio.sleep(1.0)
+                    continue
+                return None
 
-        if len(fills) == 0:
+            fills = response.json()
+            if not isinstance(fills, list):
+                return None
+
+            result = {
+                "orders_per_day": 0.0,
+                "has_btc_eth": False,
+                "fill_count": len(fills),
+            }
+
+            if len(fills) == 0:
+                return result
+
+            # Check for BTC/ETH fills
+            for fill in fills:
+                coin = fill.get("coin", "").upper()
+                if coin in ("BTC", "ETH"):
+                    result["has_btc_eth"] = True
+                    break
+
+            # Calculate orders per day for HFT detection
+            orders_by_id: Dict[str, List[dict]] = {}
+            for fill in fills:
+                oid = str(fill.get("oid", ""))
+                if oid not in orders_by_id:
+                    orders_by_id[oid] = []
+                orders_by_id[oid].append(fill)
+
+            unique_orders = len(orders_by_id)
+            if unique_orders > 0:
+                all_times = [f.get("time", 0) for f in fills if f.get("time")]
+                if len(all_times) >= 2:
+                    first_time = min(all_times)
+                    last_time = max(all_times)
+                    span_days = (last_time - first_time) / (1000 * 60 * 60 * 24)
+                    if span_days >= 0.01:  # At least ~15 minutes of data
+                        result["orders_per_day"] = unique_orders / span_days
+
             return result
-
-        # Check for BTC/ETH fills
-        for fill in fills:
-            coin = fill.get("coin", "").upper()
-            if coin in ("BTC", "ETH"):
-                result["has_btc_eth"] = True
-                break
-
-        # Calculate orders per day for HFT detection
-        orders_by_id: Dict[str, List[dict]] = {}
-        for fill in fills:
-            oid = str(fill.get("oid", ""))
-            if oid not in orders_by_id:
-                orders_by_id[oid] = []
-            orders_by_id[oid].append(fill)
-
-        unique_orders = len(orders_by_id)
-        if unique_orders > 0:
-            all_times = [f.get("time", 0) for f in fills if f.get("time")]
-            if len(all_times) >= 2:
-                first_time = min(all_times)
-                last_time = max(all_times)
-                span_days = (last_time - first_time) / (1000 * 60 * 60 * 24)
-                if span_days >= 0.01:  # At least ~15 minutes of data
-                    result["orders_per_day"] = unique_orders / span_days
-
-        return result
-    except Exception as e:
-        print(f"[hl-sage] Error analyzing fills for {address}: {e}")
-        return None
+        except httpx.TimeoutException:
+            if attempt < max_retries:
+                print(f"[hl-sage] Timeout on fills for {address}, retry {attempt + 1}")
+                await asyncio.sleep(1.0)
+                continue
+            print(f"[hl-sage] Timeout analyzing fills for {address} after {max_retries + 1} attempts")
+            return None
+        except Exception as e:
+            print(f"[hl-sage] Error analyzing fills for {address}: {e}")
+            return None
+    return None
 
 
 async def fetch_leaderboard_from_api(
