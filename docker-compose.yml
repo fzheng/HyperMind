@@ -26,7 +26,7 @@ services:
       retries: 5
     networks: [hl_net]
     ports:
-      - "127.0.0.1:${PG_PORT:-5432}:5432"
+      - "0.0.0.0:${PG_PORT:-5432}:5432"
 
   nats:
     image: nats:2.10-alpine
@@ -42,8 +42,8 @@ services:
       start_period: 5s
     networks: [hl_net]
     ports:
-      - "127.0.0.1:${NATS_PORT:-4222}:4222"
-      - "127.0.0.1:${NATS_MONITOR_PORT:-8222}:8222"
+      - "0.0.0.0:${NATS_PORT:-4222}:4222"
+      - "0.0.0.0:${NATS_MONITOR_PORT:-8222}:8222"
 
   hl-scout:
     build:
@@ -55,7 +55,7 @@ services:
       PORT: 8080
       OWNER_TOKEN: ${OWNER_TOKEN:-dev-owner}
       DATABASE_URL: ${DATABASE_URL:-postgresql://hlbot:hlbotpassword@postgres:5432/hlbot}
-      NATS_URL: nats://nats:4222
+      NATS_URL: ${NATS_URL:-nats://nats:4222}
       SERVICE_NAME: hl-scout
     depends_on:
       postgres:
@@ -70,7 +70,7 @@ services:
       retries: 5
     networks: [hl_net]
     ports:
-      - "127.0.0.1:${SCOUT_PORT:-4101}:8080"
+      - "0.0.0.0:${SCOUT_PORT:-4101}:8080"
 
   hl-stream:
     build:
@@ -81,8 +81,8 @@ services:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: 8080
       OWNER_TOKEN: ${OWNER_TOKEN:-dev-owner}
-      NATS_URL: nats://nats:4222
-      SCOUT_URL: http://hl-scout:8080
+      NATS_URL: ${NATS_URL:-nats://nats:4222}
+      SCOUT_URL: ${SCOUT_URL:-http://hl-scout:8080}
       DATABASE_URL: ${DATABASE_URL:-postgresql://hlbot:hlbotpassword@postgres:5432/hlbot}
       SERVICE_NAME: hl-stream
     depends_on:
@@ -110,7 +110,7 @@ services:
     environment:
       PORT: 8080
       OWNER_TOKEN: ${OWNER_TOKEN:-dev-owner}
-      NATS_URL: nats://nats:4222
+      NATS_URL: ${NATS_URL:-nats://nats:4222}
       DATABASE_URL: ${DATABASE_URL:-postgresql://hlbot:hlbotpassword@postgres:5432/hlbot}
       SERVICE_NAME: hl-sage
     depends_on:
@@ -126,7 +126,7 @@ services:
       retries: 5
     networks: [hl_net]
     ports:
-      - "127.0.0.1:${SAGE_PORT:-4103}:8080"
+      - "0.0.0.0:${SAGE_PORT:-4103}:8080"
 
   hl-decide:
     build:
@@ -136,7 +136,7 @@ services:
     environment:
       PORT: 8080
       OWNER_TOKEN: ${OWNER_TOKEN:-dev-owner}
-      NATS_URL: nats://nats:4222
+      NATS_URL: ${NATS_URL:-nats://nats:4222}
       DATABASE_URL: ${DATABASE_URL:-postgresql://hlbot:hlbotpassword@postgres:5432/hlbot}
       SERVICE_NAME: hl-decide
     depends_on:
@@ -152,4 +152,4 @@ services:
       retries: 5
     networks: [hl_net]
     ports:
-      - "127.0.0.1:${DECIDE_PORT:-4104}:8080"
+      - "0.0.0.0:${DECIDE_PORT:-4104}:8080"

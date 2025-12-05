@@ -2065,13 +2065,55 @@ function initInfiniteScroll() {
   });
 }
 
+// Fetch historical fills from Hyperliquid API (when DB is empty)
+async function fetchHistoryFromAPI() {
+  const loadBtn = document.getElementById('load-history-btn');
+  if (loadBtn) {
+    loadBtn.classList.add('loading');
+    loadBtn.textContent = 'Fetching...';
+    loadBtn.disabled = true;
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}/fills/fetch-history`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 50 })
+    });
+    const data = await response.json();
+
+    if (data.inserted > 0) {
+      // Refresh fills from database after fetching
+      hasMoreFills = true; // Reset so we can load from DB
+      await refreshFills();
+    }
+    return data.inserted || 0;
+  } catch (err) {
+    console.error('Fetch history error:', err);
+    return 0;
+  } finally {
+    if (loadBtn) {
+      loadBtn.classList.remove('loading');
+      loadBtn.disabled = false;
+      updateFillsStatus();
+    }
+  }
+}
+
 // Initialize load history button
 function initLoadHistoryButton() {
   const btn = document.getElementById('load-history-btn');
   if (!btn) return;
 
   btn.addEventListener('click', async () => {
-    // Use loadMoreFills for pagination - it handles everything including UI updates
+    // If we have no fills, fetch from Hyperliquid API first
+    if (fillsCache.length === 0) {
+      const inserted = await fetchHistoryFromAPI();
+      if (inserted > 0) {
+        return; // refreshFills already called
+      }
+    }
+    // Otherwise load more from database
     await loadMoreFills();
   });
 }
@@ -2159,11 +2201,7 @@ tabButtons.forEach(btn => {
   });
 });
 
-// Restore saved tab on load
-const savedTab = localStorage.getItem('activeTab');
-if (savedTab && document.getElementById(`tab-${savedTab}`)) {
-  switchTab(savedTab);
-}
+// NOTE: Tab restoration moved to end of file after Alpha Pool is defined
 
 // =====================
 // Alpha Pool
@@ -2377,3 +2415,11 @@ setInterval(() => {
     refreshAlphaPool();
   }
 }, 60000); // Every minute
+
+// =====================
+// Tab Restoration (must be after Alpha Pool is defined)
+// =====================
+const savedTab = localStorage.getItem('activeTab');
+if (savedTab && document.getElementById(`tab-${savedTab}`)) {
+  switchTab(savedTab);
+}

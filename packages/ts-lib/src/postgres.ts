@@ -38,7 +38,7 @@ export async function getPool(config?: PoolConfig): Promise<Pool> {
     config?.connectionString ||
     process.env.PG_CONNECTION_STRING ||
     process.env.DATABASE_URL ||
-    `postgresql://${process.env.POSTGRES_USER || 'postgres'}:${process.env.POSTGRES_PASSWORD || ''}@${process.env.PGHOST || 'localhost'}:${process.env.PGPORT || '5432'}/${process.env.PGDATABASE || 'postgres'}`;
+    `postgresql://${process.env.POSTGRES_USER || 'postgres'}:${process.env.POSTGRES_PASSWORD || ''}@${process.env.PGHOST || '0.0.0.0'}:${process.env.PGPORT || '5432'}/${process.env.PGDATABASE || 'postgres'}`;
 
   if (pool) {
     // Warn if trying to use different connection string

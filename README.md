@@ -92,6 +92,7 @@ npm run test:e2e                  # Run E2E tests
 | [FAQ](docs/FAQ.md) | Frequently asked questions |
 | [Testing Guide](docs/TESTING.md) | Test suite documentation |
 | [Development Plan](docs/DEVELOPMENT_PLAN.md) | Roadmap and phases |
+| [Render Deployment](docs/RENDER_DEPLOYMENT.md) | Cloud deployment guide |
 
 ## Services
 

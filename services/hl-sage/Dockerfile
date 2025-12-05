@@ -10,5 +10,8 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY contracts ./contracts
 COPY services/hl-sage ./services/hl-sage
+COPY docker/entrypoint-python.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["uvicorn", "services.hl-sage.app.main:app", "--host", "0.0.0.0", "--port", "8080"]

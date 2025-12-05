@@ -1,8 +1,8 @@
 import { connect, JSONCodec } from 'nats';
 
 const OWNER_TOKEN = process.env.OWNER_TOKEN || 'dev-owner';
-const BASE_URL = process.env.SCOUT_URL || 'http://127.0.0.1:4101';
-const NATS_URL = process.env.NATS_URL || 'nats://127.0.0.1:4222';
+const BASE_URL = process.env.SCOUT_URL || 'http://0.0.0.0:4101';
+const NATS_URL = process.env.NATS_URL || 'nats://0.0.0.0:4222';
 
 async function seed() {
   const addresses = [

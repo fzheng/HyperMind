@@ -5,17 +5,17 @@
  *
  * Usage:
  *   node scripts/admin-refresh.mjs                 # Uses default SCOUT_URL
- *   node scripts/admin-refresh.mjs --url http://localhost:4101
+ *   node scripts/admin-refresh.mjs --url http://0.0.0.0:4101
  *   OWNER_TOKEN=mytoken node scripts/admin-refresh.mjs
  *
  * Environment variables:
  *   OWNER_TOKEN - Required for authentication
- *   SCOUT_URL   - Base URL for hl-scout service (default: http://localhost:4101)
+ *   SCOUT_URL   - Base URL for hl-scout service (default: http://0.0.0.0:4101)
  */
 
 import { parseArgs } from 'node:util';
 
-const DEFAULT_SCOUT_URL = process.env.SCOUT_URL || 'http://localhost:4101';
+const DEFAULT_SCOUT_URL = process.env.SCOUT_URL || 'http://0.0.0.0:4101';
 
 async function main() {
   // Parse command line arguments

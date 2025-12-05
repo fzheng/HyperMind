@@ -383,7 +383,7 @@ function configureWebSocket(server: http.Server) {
  * Initializes NATS, RealtimeTracker, Express server, and WebSocket.
  */
 async function main() {
-  const natsUrl = process.env.NATS_URL || 'nats://localhost:4222';
+  const natsUrl = process.env.NATS_URL || 'nats://0.0.0.0:4222';
   const nats = await connectNats(natsUrl);
   await ensureStream(nats.jsm, 'HL_C', [fillsSubject]);
 

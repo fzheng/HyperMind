@@ -23,7 +23,7 @@ loadEnvFile();
 
 function getDatabaseUrl() {
   if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
-  const host = process.env.PGHOST || 'localhost';
+  const host = process.env.PGHOST || '0.0.0.0';
   const port = process.env.PGPORT || '5432';
   const user = process.env.PGUSER || process.env.POSTGRES_USER || 'postgres';
   const password = process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD;

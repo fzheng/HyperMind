@@ -22,7 +22,7 @@ export default defineConfig({
   /* Shared settings for all the projects below */
   use: {
     /* Base URL to use in actions like `await page.goto('/')` */
-    baseURL: process.env.DASHBOARD_URL || 'http://localhost:4102',
+    baseURL: process.env.DASHBOARD_URL || 'http://0.0.0.0:4102',
 
     /* Collect trace when retrying the failed test */
     trace: 'on-first-retry',
@@ -58,7 +58,7 @@ export default defineConfig({
   // Uncomment if you want Playwright to start the server automatically
   // webServer: {
   //   command: 'docker compose up -d hl-stream',
-  //   url: 'http://localhost:4102/healthz',
+  //   url: 'http://0.0.0.0:4102/healthz',
   //   reuseExistingServer: !process.env.CI,
   //   timeout: 120 * 1000,
   // },

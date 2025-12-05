@@ -36,8 +36,8 @@ from contracts.py.models import FillEvent, ScoreEvent
 from .consensus import ConsensusDetector, Fill, ConsensusSignal
 
 SERVICE_NAME = "hl-decide"
-NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
-DB_URL = os.getenv("DATABASE_URL", "postgresql://hlbot:hlbotpassword@localhost:5432/hlbot")
+NATS_URL = os.getenv("NATS_URL", "nats://0.0.0.0:4222")
+DB_URL = os.getenv("DATABASE_URL", "postgresql://hlbot:hlbotpassword@0.0.0.0:5432/hlbot")
 MAX_SCORES = int(os.getenv("MAX_SCORES", "500"))
 MAX_FILLS = int(os.getenv("MAX_FILLS", "500"))
 

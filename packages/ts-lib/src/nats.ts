@@ -28,12 +28,12 @@ export interface NatsBundle {
 /**
  * Establishes a connection to NATS server with JetStream support.
  *
- * @param url - NATS server URL (e.g., 'nats://localhost:4222')
+ * @param url - NATS server URL (e.g., 'nats://0.0.0.0:4222')
  * @returns Bundle containing connection, JetStream client, and manager
  *
  * @example
  * ```typescript
- * const { nc, js, jsm } = await connectNats('nats://localhost:4222');
+ * const { nc, js, jsm } = await connectNats('nats://0.0.0.0:4222');
  * ```
  */
 export async function connectNats(url: string): Promise<NatsBundle> {

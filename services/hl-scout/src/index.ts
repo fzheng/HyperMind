@@ -358,7 +358,7 @@ async function bootstrapCandidates(subject: string, js: Awaited<ReturnType<typeo
 async function main() {
   await getPool(); // ensure db connectivity
   await runMigrations(); // apply any pending migrations
-  const natsUrl = process.env.NATS_URL || 'nats://localhost:4222';
+  const natsUrl = process.env.NATS_URL || 'nats://0.0.0.0:4222';
   const topic = 'a.candidates.v1';
   const nats = await connectNats(natsUrl);
   await ensureStream(nats.jsm, 'HL_A', [topic]);

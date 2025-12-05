@@ -61,8 +61,8 @@ from .bandit import (
 
 SERVICE_NAME = "hl-sage"
 OWNER_TOKEN = os.getenv("OWNER_TOKEN", "dev-owner")
-NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
-DB_URL = os.getenv("DATABASE_URL", "postgresql://hlbot:hlbotpassword@localhost:5432/hlbot")
+NATS_URL = os.getenv("NATS_URL", "nats://0.0.0.0:4222")
+DB_URL = os.getenv("DATABASE_URL", "postgresql://hlbot:hlbotpassword@0.0.0.0:5432/hlbot")
 MAX_TRACKED_ADDRESSES = int(os.getenv("MAX_TRACKED_ADDRESSES", "1000"))
 MAX_SCORES = int(os.getenv("MAX_SCORES", "500"))
 STALE_THRESHOLD_HOURS = int(os.getenv("STALE_THRESHOLD_HOURS", "24"))
@@ -322,6 +322,9 @@ async def get_trader_nig_params(address: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+ALPHA_POOL_AUTO_REFRESH = os.getenv("ALPHA_POOL_AUTO_REFRESH", "true").lower() == "true"
+
+
 @app.on_event("startup")
 async def startup_event():
     try:
@@ -338,9 +341,70 @@ async def startup_event():
         await ensure_stream(app.state.js, "HL_B", ["b.scores.v1"])
         await app.state.nc.subscribe("a.candidates.v1", cb=handle_candidate)
         await app.state.nc.subscribe("c.fills.v1", cb=handle_fill)
+
+        # Auto-refresh Alpha Pool if empty on startup
+        if ALPHA_POOL_AUTO_REFRESH:
+            asyncio.create_task(auto_refresh_alpha_pool_if_empty())
     except Exception as e:
         print(f"[hl-sage] Fatal startup error: {e}")
         raise
+
+
+async def auto_refresh_alpha_pool_if_empty():
+    """
+    Auto-refresh Alpha Pool on startup ONLY if it has NEVER been refreshed.
+
+    Checks if alpha_pool_addresses table has ANY records (active or not).
+    If completely empty, this is a fresh database and we bootstrap the pool.
+
+    Subsequent refreshes should be done via POST /alpha-pool/refresh
+    or a scheduled job.
+
+    Runs as a background task to not block service startup.
+    """
+    try:
+        # Wait a bit for database to be fully ready
+        await asyncio.sleep(5)
+
+        async with app.state.db.acquire() as conn:
+            # Check if pool has EVER been refreshed (any records, active or not)
+            total_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM alpha_pool_addresses"
+            )
+
+        if total_count == 0:
+            print(f"[hl-sage] Alpha Pool has never been refreshed, auto-refreshing (first-time setup)...")
+            traders = await fetch_leaderboard_from_api(limit=ALPHA_POOL_DEFAULT_SIZE)
+            if traders:
+                async with app.state.db.acquire() as conn:
+                    for trader in traders:
+                        await conn.execute(
+                            """
+                            INSERT INTO alpha_pool_addresses (address, nickname, account_value, pnl_30d, roi_30d, win_rate, last_refreshed, is_active)
+                            VALUES ($1, $2, $3, $4, $5, $6, NOW(), true)
+                            ON CONFLICT (address) DO UPDATE SET
+                                nickname = COALESCE(EXCLUDED.nickname, alpha_pool_addresses.nickname),
+                                account_value = EXCLUDED.account_value,
+                                pnl_30d = EXCLUDED.pnl_30d,
+                                roi_30d = EXCLUDED.roi_30d,
+                                win_rate = EXCLUDED.win_rate,
+                                last_refreshed = NOW(),
+                                is_active = true
+                            """,
+                            trader["address"],
+                            trader.get("display_name"),
+                            trader["account_value"],
+                            trader["pnl"],
+                            trader.get("roi", 0.0),
+                            trader["win_rate"],
+                        )
+                print(f"[hl-sage] Alpha Pool auto-refreshed with {len(traders)} traders")
+            else:
+                print(f"[hl-sage] Alpha Pool auto-refresh failed - no traders fetched")
+        else:
+            print(f"[hl-sage] Alpha Pool has {total_count} records (previously refreshed), skipping auto-refresh")
+    except Exception as e:
+        print(f"[hl-sage] Alpha Pool auto-refresh failed: {e}")
 
 
 @app.on_event("shutdown")
@@ -884,7 +948,11 @@ ALPHA_POOL_MAX_ORDERS_PER_DAY = float(os.getenv("ALPHA_POOL_MAX_ORDERS_PER_DAY",
 ALPHA_POOL_REFRESH_HOURS = int(os.getenv("ALPHA_POOL_REFRESH_HOURS", "24"))  # Refresh interval in hours (default 24h)
 
 
-async def analyze_user_fills(client: httpx.AsyncClient, address: str) -> Dict[str, Any]:
+async def analyze_user_fills(
+    client: httpx.AsyncClient,
+    address: str,
+    max_retries: int = 2,
+) -> Dict[str, Any]:
     """
     Analyze user's fill history for HFT detection and BTC/ETH trading.
 
@@ -892,59 +960,81 @@ async def analyze_user_fills(client: httpx.AsyncClient, address: str) -> Dict[st
     - orders_per_day: HFT detection (> 100 orders/day = HFT)
     - has_btc_eth: Whether trader has BTC or ETH fills
 
-    Returns dict with analysis results, or None on error.
+    Returns dict with analysis results, or None on error after retries.
     """
-    try:
-        response = await client.post(
-            HYPERLIQUID_INFO_URL,
-            json={"type": "userFills", "user": address.lower()},
-            timeout=10.0,
-        )
-        if response.status_code != 200:
-            return None
+    for attempt in range(max_retries + 1):
+        try:
+            response = await client.post(
+                HYPERLIQUID_INFO_URL,
+                json={"type": "userFills", "user": address.lower()},
+                timeout=15.0,  # Increased timeout
+            )
 
-        fills = response.json()
-        if not isinstance(fills, list):
-            return None
+            # Handle rate limiting with retry
+            if response.status_code == 429:
+                if attempt < max_retries:
+                    delay = (attempt + 1) * 2.0
+                    print(f"[hl-sage] Rate limited on fills for {address}, retry {attempt + 1} in {delay}s")
+                    await asyncio.sleep(delay)
+                    continue
+                return None
 
-        result = {
-            "orders_per_day": 0.0,
-            "has_btc_eth": False,
-            "fill_count": len(fills),
-        }
+            if response.status_code != 200:
+                if attempt < max_retries:
+                    await asyncio.sleep(1.0)
+                    continue
+                return None
 
-        if len(fills) == 0:
+            fills = response.json()
+            if not isinstance(fills, list):
+                return None
+
+            result = {
+                "orders_per_day": 0.0,
+                "has_btc_eth": False,
+                "fill_count": len(fills),
+            }
+
+            if len(fills) == 0:
+                return result
+
+            # Check for BTC/ETH fills
+            for fill in fills:
+                coin = fill.get("coin", "").upper()
+                if coin in ("BTC", "ETH"):
+                    result["has_btc_eth"] = True
+                    break
+
+            # Calculate orders per day for HFT detection
+            orders_by_id: Dict[str, List[dict]] = {}
+            for fill in fills:
+                oid = str(fill.get("oid", ""))
+                if oid not in orders_by_id:
+                    orders_by_id[oid] = []
+                orders_by_id[oid].append(fill)
+
+            unique_orders = len(orders_by_id)
+            if unique_orders > 0:
+                all_times = [f.get("time", 0) for f in fills if f.get("time")]
+                if len(all_times) >= 2:
+                    first_time = min(all_times)
+                    last_time = max(all_times)
+                    span_days = (last_time - first_time) / (1000 * 60 * 60 * 24)
+                    if span_days >= 0.01:  # At least ~15 minutes of data
+                        result["orders_per_day"] = unique_orders / span_days
+
             return result
-
-        # Check for BTC/ETH fills
-        for fill in fills:
-            coin = fill.get("coin", "").upper()
-            if coin in ("BTC", "ETH"):
-                result["has_btc_eth"] = True
-                break
-
-        # Calculate orders per day for HFT detection
-        orders_by_id: Dict[str, List[dict]] = {}
-        for fill in fills:
-            oid = str(fill.get("oid", ""))
-            if oid not in orders_by_id:
-                orders_by_id[oid] = []
-            orders_by_id[oid].append(fill)
-
-        unique_orders = len(orders_by_id)
-        if unique_orders > 0:
-            all_times = [f.get("time", 0) for f in fills if f.get("time")]
-            if len(all_times) >= 2:
-                first_time = min(all_times)
-                last_time = max(all_times)
-                span_days = (last_time - first_time) / (1000 * 60 * 60 * 24)
-                if span_days >= 0.01:  # At least ~15 minutes of data
-                    result["orders_per_day"] = unique_orders / span_days
-
-        return result
-    except Exception as e:
-        print(f"[hl-sage] Error analyzing fills for {address}: {e}")
-        return None
+        except httpx.TimeoutException:
+            if attempt < max_retries:
+                print(f"[hl-sage] Timeout on fills for {address}, retry {attempt + 1}")
+                await asyncio.sleep(1.0)
+                continue
+            print(f"[hl-sage] Timeout analyzing fills for {address} after {max_retries + 1} attempts")
+            return None
+        except Exception as e:
+            print(f"[hl-sage] Error analyzing fills for {address}: {e}")
+            return None
+    return None
 
 
 async def fetch_leaderboard_from_api(

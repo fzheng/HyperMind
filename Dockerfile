@@ -17,7 +17,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 # Copy production artifacts
-COPY --from=builder /app/dist ./dist
+# COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/node_modules ./node_modules
 COPY package*.json ./

@@ -1,9 +1,6 @@
 -- Migration 012: Price history for regime detection
--- Stores periodic BTC/ETH mark prices for calculating moving averages and ATR
--- Used by market regime detection (trending/ranging/volatile)
-
--- marks_1m already exists in 001_base.sql, just ensure indexes
--- Table structure: asset, ts, mid, atr14
+-- Adds indexes and columns to marks_1m for regime detection
+-- Table created in 000_base_schema.sql
 
 -- Index for efficient lookups by asset and time range
 CREATE INDEX IF NOT EXISTS marks_1m_asset_ts_desc_idx
