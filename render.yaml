@@ -1,0 +1,130 @@
+# Render Blueprint - https://render.com/docs/blueprint-spec
+# Deploy all services with: render.yaml in Render Dashboard
+
+databases:
+  - name: hlbot-db
+    databaseName: hlbot
+    user: hlbot
+    region: oregon
+
+services:
+  # NATS Message Broker
+  - type: web
+    name: nats
+    runtime: docker
+    dockerfilePath: ./docker/Dockerfile.nats
+    region: oregon
+    plan: starter
+    envVars:
+      - key: PORT
+        value: 4222
+
+  # hl-scout service
+  - type: web
+    name: hl-scout
+    runtime: docker
+    dockerfilePath: ./services/hl-scout/Dockerfile
+    dockerContext: .
+    region: oregon
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 8080
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hlbot-db
+          property: connectionString
+      - key: NATS_URL
+        fromService:
+          type: web
+          name: nats
+          property: hostport
+          envVarKey: NATS_URL
+      - key: OWNER_TOKEN
+        sync: false  # Set manually in dashboard
+
+  # hl-stream service (dashboard)
+  - type: web
+    name: hl-stream
+    runtime: docker
+    dockerfilePath: ./services/hl-stream/Dockerfile
+    dockerContext: .
+    region: oregon
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 8080
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hlbot-db
+          property: connectionString
+      - key: NATS_URL
+        fromService:
+          type: web
+          name: nats
+          property: hostport
+          envVarKey: NATS_URL
+      - key: SCOUT_URL
+        fromService:
+          type: web
+          name: hl-scout
+          property: hostport
+          envVarKey: SCOUT_URL
+      - key: OWNER_TOKEN
+        sync: false
+
+  # hl-sage service (Python/FastAPI)
+  - type: web
+    name: hl-sage
+    runtime: docker
+    dockerfilePath: ./services/hl-sage/Dockerfile
+    dockerContext: .
+    region: oregon
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hlbot-db
+          property: connectionString
+      - key: NATS_URL
+        fromService:
+          type: web
+          name: nats
+          property: hostport
+          envVarKey: NATS_URL
+      - key: OWNER_TOKEN
+        sync: false
+
+  # hl-decide service (Python/FastAPI)
+  - type: web
+    name: hl-decide
+    runtime: docker
+    dockerfilePath: ./services/hl-decide/Dockerfile
+    dockerContext: .
+    region: oregon
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hlbot-db
+          property: connectionString
+      - key: NATS_URL
+        fromService:
+          type: web
+          name: nats
+          property: hostport
+          envVarKey: NATS_URL
+      - key: OWNER_TOKEN
+        sync: false
