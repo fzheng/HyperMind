@@ -91,56 +91,6 @@ export interface UserFill {
 }
 
 /**
- * Fetches recent user fills and returns only BTC fills, newest first.
- * Values are normalized to numbers and optional fields omitted if invalid.
- */
-export async function fetchUserBtcFills(
-  address: string,
-  opts?: { aggregateByTime?: boolean }
-): Promise<UserFill[]> {
-  try {
-    const fills = await userFills(
-      { transport },
-      { user: toUser(address), aggregateByTime: opts?.aggregateByTime },
-    );
-    const out: UserFill[] = [];
-    for (const f of fills || []) {
-      if (!isBtcCoin((f as any)?.coin)) continue;
-      const px = Number((f as any)?.px);
-      const sz = Number((f as any)?.sz);
-      const time = Number((f as any)?.time);
-      const start = Number((f as any)?.startPosition);
-      const closedRaw = (f as any)?.closedPnl;
-      const feeRaw = (f as any)?.fee;
-      const feeToken = typeof (f as any)?.feeToken === 'string' ? String((f as any).feeToken) : undefined;
-      const hash = typeof (f as any)?.hash === 'string' ? String((f as any).hash) : undefined;
-      const side = ((f as any)?.side === 'B' ? 'B' : 'A') as 'B' | 'A';
-
-      if (!Number.isFinite(px) || !Number.isFinite(sz) || !Number.isFinite(time) || !Number.isFinite(start)) continue;
-
-      const closed = Number.isFinite(Number(closedRaw)) ? Number(closedRaw) : undefined;
-      const fee = Number.isFinite(Number(feeRaw)) ? Number(feeRaw) : undefined;
-
-      out.push({
-        coin: 'BTC',
-        px,
-        sz,
-        side,
-        time,
-        startPosition: start,
-        closedPnl: closed,
-        fee,
-        feeToken,
-        hash,
-      });
-    }
-    return out.sort((a, b) => b.time - a.time);
-  } catch {
-    return [];
-  }
-}
-
-/**
  * Fetches recent user fills for BTC and ETH, newest first.
  * Values are normalized to numbers and optional fields omitted if invalid.
  */

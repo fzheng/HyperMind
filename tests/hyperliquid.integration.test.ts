@@ -29,7 +29,6 @@ global.fetch = mockFetch;
 import {
   fetchBtcPerpExposure,
   fetchPerpPositions,
-  fetchUserBtcFills,
   fetchUserFills,
   fetchUserProfile,
   fetchSpotPrice,
@@ -177,78 +176,6 @@ describe('Hyperliquid API Integration', () => {
 
       expect(result[0].entryPriceUsd).toBeUndefined();
       expect(result[0].leverage).toBeUndefined();
-    });
-  });
-
-  describe('fetchUserBtcFills', () => {
-    it('should return BTC fills only, sorted by time descending', async () => {
-      mockUserFills.mockResolvedValueOnce([
-        {
-          coin: 'BTC',
-          px: '95000',
-          sz: '0.1',
-          side: 'B',
-          time: 1700000000000,
-          startPosition: '0',
-          closedPnl: '0',
-          fee: '5.25',
-          feeToken: 'USDC',
-          hash: '0xhash1',
-        },
-        {
-          coin: 'ETH', // Should be filtered out
-          px: '3500',
-          sz: '1.0',
-          side: 'A',
-          time: 1700000001000,
-          startPosition: '0',
-        },
-        {
-          coin: 'btc', // Lowercase BTC
-          px: '95100',
-          sz: '0.2',
-          side: 'A',
-          time: 1700000002000,
-          startPosition: '0.1',
-          closedPnl: '100',
-        },
-      ]);
-
-      const result = await fetchUserBtcFills('0x1234');
-
-      expect(result).toHaveLength(2);
-      expect(result[0].time).toBe(1700000002000); // Newest first
-      expect(result[1].time).toBe(1700000000000);
-      expect(result.every(f => f.coin === 'BTC')).toBe(true);
-    });
-
-    it('should return empty array on error', async () => {
-      mockUserFills.mockRejectedValueOnce(new Error('API error'));
-
-      const result = await fetchUserBtcFills('0x1234');
-      expect(result).toEqual([]);
-    });
-
-    it('should filter out fills with invalid required fields', async () => {
-      mockUserFills.mockResolvedValueOnce([
-        { coin: 'BTC', px: '95000', sz: '0.1', side: 'B', time: 1700000000000, startPosition: '0' },
-        { coin: 'BTC', px: 'invalid', sz: '0.1', side: 'B', time: 1700000000000, startPosition: '0' },
-        { coin: 'BTC', px: '95000', sz: NaN, side: 'B', time: 1700000000000, startPosition: '0' },
-      ]);
-
-      const result = await fetchUserBtcFills('0x1234');
-      expect(result).toHaveLength(1);
-    });
-
-    it('should pass aggregateByTime option', async () => {
-      mockUserFills.mockResolvedValueOnce([]);
-
-      await fetchUserBtcFills('0x1234', { aggregateByTime: true });
-
-      expect(mockUserFills).toHaveBeenCalledWith(
-        expect.any(Object),
-        { user: '0x1234', aggregateByTime: true }
-      );
     });
   });
 
