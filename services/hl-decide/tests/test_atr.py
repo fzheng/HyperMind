@@ -29,6 +29,9 @@ from app.atr import (
     ATR_FALLBACK_PCT,
     ATR_MAX_STALENESS_SECONDS,
     ATR_FALLBACK_BY_ASSET,
+    ATR_STRICT_MODE,
+    ATR_REALIZED_VOL_WINDOW_HOURS,
+    ATR_REALIZED_VOL_MIN_SAMPLES,
 )
 
 
@@ -153,7 +156,7 @@ class TestATRProvider:
         atr_data = provider._fallback_atr("BTC", 100000.0)
 
         assert atr_data.asset == "BTC"
-        assert atr_data.source == "fallback"
+        assert atr_data.source == "fallback_hardcoded"
         assert atr_data.multiplier == ATR_MULTIPLIER_BTC
         # Fallback atr_pct is 0.4% (BTC-specific), multiplier is 2.0
         btc_fallback = ATR_FALLBACK_BY_ASSET.get("BTC", 0.5)
@@ -166,7 +169,7 @@ class TestATRProvider:
         atr_data = provider._fallback_atr("ETH", 4000.0)
 
         assert atr_data.asset == "ETH"
-        assert atr_data.source == "fallback"
+        assert atr_data.source == "fallback_hardcoded"
         assert atr_data.multiplier == ATR_MULTIPLIER_ETH
         # Fallback atr_pct is 0.6% (ETH-specific), multiplier is 1.5
         eth_fallback = ATR_FALLBACK_BY_ASSET.get("ETH", 0.5)
@@ -430,10 +433,27 @@ class TestATRStaleness:
             multiplier=2.0,
             stop_distance_pct=1.0,
             timestamp=datetime.now(timezone.utc),
-            source="fallback",
+            source="fallback_hardcoded",
         )
 
         assert atr_data.is_stale is True
+
+    def test_realized_vol_is_stale_but_data_driven(self):
+        """Realized vol data should be flagged as stale but is data-driven."""
+        atr_data = ATRData(
+            asset="BTC",
+            atr=500.0,
+            atr_pct=0.5,
+            price=100000.0,
+            multiplier=2.0,
+            stop_distance_pct=1.0,
+            timestamp=datetime.now(timezone.utc),
+            source="realized_vol",
+        )
+
+        # Stale for strict mode purposes, but still data-driven
+        assert atr_data.is_stale is True
+        assert atr_data.is_data_driven is True
 
     def test_check_staleness_returns_message(self):
         """check_staleness should return descriptive message."""
@@ -487,3 +507,210 @@ class TestAssetSpecificFallbacks:
 
         # Unknown asset uses 0.5% default
         assert atr_data.atr_pct == 0.5
+
+
+class TestStrictModeGating:
+    """Test strict mode gating for ATR data quality."""
+
+    def test_should_block_gate_for_hardcoded_fallback_in_strict_mode(self):
+        """Hardcoded fallback should block gating in strict mode."""
+        provider = ATRProvider()
+
+        fallback_data = ATRData(
+            asset="BTC",
+            atr=500.0,
+            atr_pct=0.5,
+            price=100000.0,
+            multiplier=2.0,
+            stop_distance_pct=1.0,
+            timestamp=datetime.now(timezone.utc),
+            source="fallback_hardcoded",
+        )
+
+        # In strict mode (default), should block
+        should_block, reason = provider.should_block_gate(fallback_data)
+        if ATR_STRICT_MODE:
+            assert should_block is True
+            assert "strict mode" in reason.lower()
+        else:
+            assert should_block is False
+
+    def test_should_not_block_gate_for_fresh_db_data(self):
+        """Fresh DB data should never block gating."""
+        provider = ATRProvider()
+
+        fresh_data = ATRData(
+            asset="BTC",
+            atr=1500.0,
+            atr_pct=1.5,
+            price=100000.0,
+            multiplier=2.0,
+            stop_distance_pct=3.0,
+            timestamp=datetime.now(timezone.utc),
+            source="db",
+        )
+
+        should_block, reason = provider.should_block_gate(fresh_data)
+        assert should_block is False
+
+    def test_should_not_block_gate_for_realized_vol(self):
+        """Realized vol data should not block gating (it's data-driven)."""
+        provider = ATRProvider()
+
+        realized_vol_data = ATRData(
+            asset="BTC",
+            atr=500.0,
+            atr_pct=0.5,
+            price=100000.0,
+            multiplier=2.0,
+            stop_distance_pct=1.0,
+            timestamp=datetime.now(timezone.utc),
+            source="realized_vol",
+        )
+
+        should_block, reason = provider.should_block_gate(realized_vol_data)
+        assert should_block is False
+
+    def test_is_data_driven_property(self):
+        """is_data_driven should correctly identify data sources."""
+        # Data-driven sources
+        for source in ["db", "calculated", "realized_vol"]:
+            data = ATRData(
+                asset="BTC",
+                atr=1000.0,
+                atr_pct=1.0,
+                price=100000.0,
+                multiplier=2.0,
+                stop_distance_pct=2.0,
+                timestamp=datetime.now(timezone.utc),
+                source=source,
+            )
+            assert data.is_data_driven is True, f"Source {source} should be data-driven"
+
+        # Non-data-driven sources
+        hardcoded = ATRData(
+            asset="BTC",
+            atr=500.0,
+            atr_pct=0.5,
+            price=100000.0,
+            multiplier=2.0,
+            stop_distance_pct=1.0,
+            timestamp=datetime.now(timezone.utc),
+            source="fallback_hardcoded",
+        )
+        assert hardcoded.is_data_driven is False
+
+
+class TestRealizedVolatility:
+    """Test realized volatility fallback calculation."""
+
+    @pytest.mark.asyncio
+    async def test_compute_realized_vol_insufficient_data(self):
+        """Realized vol should return None with insufficient samples."""
+        provider = ATRProvider()
+
+        # Mock pool with insufficient data
+        mock_pool = MagicMock()
+        mock_conn = MagicMock()
+        mock_conn.fetch = AsyncMock(return_value=[
+            {"close": 100.0, "ts": datetime.now(timezone.utc)},
+            {"close": 101.0, "ts": datetime.now(timezone.utc)},
+        ])  # Only 2 samples, need at least 60
+
+        mock_pool.acquire = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+        provider.pool = mock_pool
+
+        result = await provider._compute_realized_vol("BTC", 100000.0)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_compute_realized_vol_sufficient_data(self):
+        """Realized vol should compute correctly with sufficient samples."""
+        provider = ATRProvider()
+
+        # Generate mock data with 100 samples
+        now = datetime.now(timezone.utc)
+        mock_rows = []
+        price = 100.0
+        for i in range(100):
+            # Small random-ish moves (alternating +0.1% and -0.05%)
+            if i % 2 == 0:
+                price *= 1.001
+            else:
+                price *= 0.9995
+            mock_rows.append({
+                "close": price,
+                "ts": now + timedelta(minutes=i),
+            })
+
+        mock_pool = MagicMock()
+        mock_conn = MagicMock()
+        mock_conn.fetch = AsyncMock(return_value=mock_rows)
+
+        mock_pool.acquire = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+        provider.pool = mock_pool
+
+        result = await provider._compute_realized_vol("BTC", 100000.0)
+
+        assert result is not None
+        assert result.source == "realized_vol"
+        assert result.asset == "BTC"
+        assert 0.01 < result.atr_pct < 0.5  # Reasonable range for small moves
+
+    @pytest.mark.asyncio
+    async def test_compute_realized_vol_no_pool(self):
+        """Realized vol should return None if no pool configured."""
+        provider = ATRProvider()
+        provider.pool = None
+
+        result = await provider._compute_realized_vol("BTC", 100000.0)
+        assert result is None
+
+
+class TestConsensusATRValidityGate:
+    """Test consensus detector ATR validity gating."""
+
+    def test_set_stop_fraction_with_validity(self):
+        """set_stop_fraction should track validity status."""
+        from app.consensus import ConsensusDetector
+
+        detector = ConsensusDetector()
+
+        # Set with valid ATR
+        detector.set_stop_fraction("BTC", 0.02, is_valid_for_gating=True, validity_reason="Fresh from DB")
+        assert detector.get_stop_fraction("BTC") == 0.02
+
+        is_valid, reason = detector.is_atr_valid_for_gating("BTC")
+        assert is_valid is True
+        assert reason == "Fresh from DB"
+
+    def test_set_stop_fraction_with_invalid_atr(self):
+        """set_stop_fraction should track invalid ATR status."""
+        from app.consensus import ConsensusDetector
+
+        detector = ConsensusDetector()
+
+        # Set with invalid ATR (hardcoded fallback in strict mode)
+        detector.set_stop_fraction(
+            "BTC", 0.01,
+            is_valid_for_gating=False,
+            validity_reason="Strict mode: hardcoded fallback"
+        )
+
+        is_valid, reason = detector.is_atr_valid_for_gating("BTC")
+        assert is_valid is False
+        assert "hardcoded" in reason.lower()
+
+    def test_default_atr_validity(self):
+        """Symbols without explicit validity should default to valid."""
+        from app.consensus import ConsensusDetector
+
+        detector = ConsensusDetector()
+
+        is_valid, reason = detector.is_atr_valid_for_gating("SOL")
+        assert is_valid is True
+        assert reason == ""

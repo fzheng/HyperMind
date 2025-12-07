@@ -873,6 +873,9 @@ Based on peer quant review, the following robustness improvements were implement
 - [x] **Asset-specific fallbacks**: Replaced hardcoded 0.5% fallback with `ATR_FALLBACK_BY_ASSET` (BTC: 0.4%, ETH: 0.6%) based on typical 1-min ATR profiles.
 - [x] **Fallback logging**: Warning logged when ATR uses fallback values for production visibility.
 - [x] **`get_atr_with_staleness_check()`**: New method returns tuple of (ATRData, is_stale) with optional logging.
+- [x] **ATR strict mode**: `ATR_STRICT_MODE=true` (default) blocks gating when ATR uses hardcoded fallback. Set to `false` for non-prod to warn-and-pass.
+- [x] **24h realized vol fallback**: `_compute_realized_vol()` calculates rolling 24h volatility from `marks_1m` as data-driven fallback before using hardcoded values.
+- [x] **ATR validity gate**: ConsensusDetector tracks `atr_validity` per symbol; price gate fails if ATR data quality is insufficient in strict mode.
 
 **Correlation Enhancements**:
 - [x] **Correlation staleness**: `CorrelationProvider.is_stale` flags data older than `CORR_MAX_STALENESS_DAYS` (default 7 days).
@@ -882,24 +885,44 @@ Based on peer quant review, the following robustness improvements were implement
 - [x] **Default usage tracking**: Provider tracks how many times default correlation was used (`_default_used_count`).
 - [x] **Hydrate with decay**: `hydrate_detector(apply_decay=True)` applies decay when loading correlations into ConsensusDetector.
 
-**New Tests** (20 tests added):
-- `TestATRStaleness`: 4 tests for staleness detection
+**Vote Weighting Improvements**:
+- [x] **Logarithmic scaling**: Default mode (`VOTE_WEIGHT_MODE=log`) uses `log(1 + notional/base)` to smooth large vs small positions.
+- [x] **Equity-normalized mode**: When `VOTE_WEIGHT_MODE=equity` and equity data available, uses `sqrt(notional/equity)` for risk-adjusted weighting.
+- [x] **Configurable base**: `VOTE_WEIGHT_LOG_BASE=10000` ($10k base for log scaling).
+- [x] **Max weight cap**: `VOTE_WEIGHT_MAX=1.0` prevents any single trader from dominating.
+- [x] **Notional tracking**: Vote dataclass now tracks `notional` and `equity` for transparency.
+- [x] **Backwards compatibility**: `VOTE_WEIGHT_MODE=linear` preserves legacy behavior for testing.
+
+**New Tests** (39 tests added):
+- `TestATRStaleness`: 5 tests for staleness detection (including realized_vol)
 - `TestAssetSpecificFallbacks`: 3 tests for per-asset fallback values
+- `TestStrictModeGating`: 4 tests for ATR strict mode behavior
+- `TestRealizedVolatility`: 3 tests for 24h realized vol calculation
+- `TestConsensusATRValidityGate`: 3 tests for consensus ATR validity
 - `TestCorrelationStaleness`: 3 tests for correlation data staleness
 - `TestCorrelationDecay`: 4 tests for exponential decay calculation
 - `TestGetWithDecay`: 4 tests for decayed correlation lookup
 - `TestCheckFreshness`: 3 tests for freshness status
 - `TestDecayQuantAcceptance`: 3 quant acceptance tests for decay behavior
+- `TestVoteWeighting`: 8 tests for log/equity/linear vote weighting modes
 
 **Configuration**:
 ```bash
-# ATR staleness
-ATR_MAX_STALENESS_SECONDS=300  # 5 minutes
+# ATR staleness and strict mode
+ATR_MAX_STALENESS_SECONDS=300   # 5 minutes
+ATR_STRICT_MODE=true            # Block gating on hardcoded fallback (default true)
+ATR_REALIZED_VOL_WINDOW_HOURS=24  # Rolling window for realized vol fallback
+ATR_REALIZED_VOL_MIN_SAMPLES=60   # Min candles for realized vol calculation
 
 # Correlation staleness and decay
-CORR_MAX_STALENESS_DAYS=7      # Max age before full fallback
-CORR_DECAY_HALFLIFE_DAYS=3.0   # Half-life for exponential decay
-DEFAULT_CORRELATION=0.3         # Used when data missing or very stale
+CORR_MAX_STALENESS_DAYS=7       # Max age before full fallback
+CORR_DECAY_HALFLIFE_DAYS=3.0    # Half-life for exponential decay
+DEFAULT_CORRELATION=0.3          # Used when data missing or very stale
+
+# Vote weighting
+VOTE_WEIGHT_MODE=log            # "log" (default), "equity", or "linear"
+VOTE_WEIGHT_LOG_BASE=10000.0    # $10k base for log scaling
+VOTE_WEIGHT_MAX=1.0             # Max weight per trader
 ```
 
 ---

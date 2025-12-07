@@ -678,3 +678,158 @@ class TestATRToConsensusFlow:
         # Short position stop
         short_stop = entry_price + stop_distance
         assert short_stop == 103000.0  # 100k + 3% = 103k
+
+
+class TestVoteWeighting:
+    """Test improved vote weighting with equity-normalized and log scaling."""
+
+    def test_log_weight_scales_sublinearly(self):
+        """Log weighting should give sublinear scaling with notional."""
+        from app.consensus import calculate_vote_weight
+
+        # $10k position
+        w_10k = calculate_vote_weight(10000, mode="log", log_base=10000)
+        # $100k position (10x larger)
+        w_100k = calculate_vote_weight(100000, mode="log", log_base=10000)
+        # $1M position (100x larger)
+        w_1m = calculate_vote_weight(1000000, mode="log", log_base=10000)
+
+        # Weights should increase sublinearly
+        assert w_10k > 0
+        assert w_100k > w_10k
+        assert w_1m > w_100k
+
+        # 10x notional should NOT give 10x weight
+        assert w_100k / w_10k < 5  # log(11) / log(2) ≈ 3.46
+        assert w_1m / w_10k < 10  # log(101) / log(2) ≈ 6.66
+
+    def test_equity_weight_with_sqrt(self):
+        """Equity-normalized weighting should use sqrt for smoothing."""
+        from app.consensus import calculate_vote_weight
+
+        # 10% position relative to equity (10k position, 100k equity)
+        w_10pct = calculate_vote_weight(10000, equity=100000, mode="equity")
+        # 40% position relative to equity (40k position, 100k equity)
+        w_40pct = calculate_vote_weight(40000, equity=100000, mode="equity")
+
+        # sqrt(0.1) ≈ 0.316, sqrt(0.4) ≈ 0.632
+        assert w_10pct == pytest.approx(0.316, rel=0.05)
+        assert w_40pct == pytest.approx(0.632, rel=0.05)
+
+        # Quadrupling position doubles weight (sqrt scaling)
+        assert w_40pct / w_10pct == pytest.approx(2.0, rel=0.05)
+
+    def test_equity_weight_caps_at_max(self):
+        """Equity-normalized weight should cap at max_weight."""
+        from app.consensus import calculate_vote_weight
+
+        # 200% position relative to equity (way over-leveraged)
+        w_200pct = calculate_vote_weight(200000, equity=100000, mode="equity", max_weight=1.0)
+
+        # sqrt(2.0) ≈ 1.41, but capped at 1.0
+        assert w_200pct == 1.0
+
+    def test_equity_mode_falls_back_to_log_without_equity(self):
+        """Equity mode should fall back to log when equity not available."""
+        from app.consensus import calculate_vote_weight
+
+        # No equity data
+        w_no_equity = calculate_vote_weight(100000, equity=None, mode="equity")
+        # Explicit log mode
+        w_log = calculate_vote_weight(100000, mode="log")
+
+        # Should be equal since equity mode falls back to log
+        assert w_no_equity == w_log
+
+    def test_linear_mode_for_backwards_compat(self):
+        """Linear mode should work for backwards compatibility."""
+        from app.consensus import calculate_vote_weight
+
+        # $100k position with $10k base
+        w_100k = calculate_vote_weight(100000, mode="linear", log_base=10000)
+
+        # Linear: 100k / 10k = 10, but capped at 1.0
+        assert w_100k == 1.0
+
+        # Smaller position
+        w_5k = calculate_vote_weight(5000, mode="linear", log_base=10000, max_weight=1.0)
+        assert w_5k == pytest.approx(0.5, rel=0.01)  # 5k / 10k = 0.5
+
+    def test_zero_notional_returns_zero_weight(self):
+        """Zero or negative notional should return zero weight."""
+        from app.consensus import calculate_vote_weight
+
+        assert calculate_vote_weight(0) == 0.0
+        assert calculate_vote_weight(-1000) == 0.0
+
+    def test_collapse_to_votes_uses_new_weighting(self):
+        """collapse_to_votes should use the new weighting function."""
+        from app.consensus import ConsensusDetector, Fill
+
+        detector = ConsensusDetector()
+        now = datetime.now(timezone.utc)
+
+        # Create fills with different sizes
+        fills = [
+            Fill(fill_id="1", address="0xsmall", asset="BTC", side="buy", size=0.1, price=100000.0, ts=now),
+            Fill(fill_id="2", address="0xlarge", asset="BTC", side="buy", size=1.0, price=100000.0, ts=now),
+        ]
+
+        votes = detector.collapse_to_votes(fills)
+
+        # Both should have votes
+        assert len(votes) == 2
+
+        small_vote = next(v for v in votes if "small" in v.address)
+        large_vote = next(v for v in votes if "large" in v.address)
+
+        # Notional should be tracked
+        assert small_vote.notional == pytest.approx(10000, rel=0.01)  # 0.1 * 100k
+        assert large_vote.notional == pytest.approx(100000, rel=0.01)  # 1.0 * 100k
+
+        # Larger position should have higher weight
+        assert large_vote.weight > small_vote.weight
+
+        # But not 10x higher (log scaling)
+        assert large_vote.weight / small_vote.weight < 5
+
+    def test_collapse_to_votes_with_equity(self):
+        """collapse_to_votes should use equity-normalized weights when available."""
+        from app.consensus import ConsensusDetector, Fill
+
+        detector = ConsensusDetector()
+        now = datetime.now(timezone.utc)
+
+        fills = [
+            Fill(fill_id="1", address="0xrich", asset="BTC", side="buy", size=1.0, price=100000.0, ts=now),
+            Fill(fill_id="2", address="0xpoor", asset="BTC", side="buy", size=1.0, price=100000.0, ts=now),
+        ]
+
+        # Rich trader has 10M equity, poor trader has 100k equity
+        # Same notional ($100k) but very different position ratios
+        equity_map = {
+            "0xrich": 10000000.0,  # 1% position
+            "0xpoor": 100000.0,    # 100% position
+        }
+
+        # Set mode to equity for this test
+        import os
+        original_mode = os.environ.get("VOTE_WEIGHT_MODE")
+        try:
+            os.environ["VOTE_WEIGHT_MODE"] = "equity"
+            votes = detector.collapse_to_votes(fills, equity_by_address=equity_map)
+
+            rich_vote = next(v for v in votes if "rich" in v.address)
+            poor_vote = next(v for v in votes if "poor" in v.address)
+
+            # Both have same notional
+            assert rich_vote.notional == poor_vote.notional
+
+            # But equity is tracked
+            assert rich_vote.equity == 10000000.0
+            assert poor_vote.equity == 100000.0
+        finally:
+            if original_mode:
+                os.environ["VOTE_WEIGHT_MODE"] = original_mode
+            elif "VOTE_WEIGHT_MODE" in os.environ:
+                del os.environ["VOTE_WEIGHT_MODE"]
