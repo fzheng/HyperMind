@@ -1077,6 +1077,10 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
     This replaces the fill-by-fill consensus checking with episode-based checking.
     Each episode represents one trader's current position = one vote.
 
+    Uses centralized functions from consensus.py to avoid logic drift:
+    - calculate_vote_weight() for vote weighting (log/equity modes)
+    - ConsensusDetector.passes_latency_and_price_gates() for ATR-based R-unit drift check
+
     Args:
         asset: The asset to check consensus for
         episode_fills: List of Fill objects derived from open episodes
@@ -1085,10 +1089,10 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
         ConsensusSignal if consensus detected, None otherwise
     """
     from .consensus import (
-        passes_consensus_gates, calculate_ev, bps_to_R,
+        passes_consensus_gates, calculate_ev, calculate_vote_weight,
+        ConsensusWindow, Vote,
         CONSENSUS_MIN_TRADERS, CONSENSUS_MIN_AGREEING, CONSENSUS_MIN_PCT,
-        CONSENSUS_MIN_EFFECTIVE_K, CONSENSUS_EV_MIN_R,
-        DEFAULT_CORRELATION
+        CONSENSUS_MIN_EFFECTIVE_K, CONSENSUS_EV_MIN_R, CONSENSUS_BASE_WINDOW_S,
     )
     import statistics
 
@@ -1096,22 +1100,26 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
         return None
 
     # One vote per trader (already deduplicated by episode)
-    votes = []
+    # Use centralized calculate_vote_weight() for proper log/equity weighting
+    votes: list[Vote] = []
     for fill in episode_fills:
         direction = 'long' if fill.side.lower() in ('buy', 'long') else 'short'
-        # Weight by notional, capped at 1.0
         notional = fill.size * fill.price
-        weight = min(notional / 100000, 1.0)  # Normalize by $100k
 
-        votes.append({
-            'address': fill.address.lower(),
-            'direction': direction,
-            'weight': weight,
-            'price': fill.price,
-            'ts': fill.ts,
-        })
+        # Use centralized weight calculation (respects VOTE_WEIGHT_MODE: log/equity/linear)
+        weight = calculate_vote_weight(notional, equity=None)
 
-    directions = [v['direction'] for v in votes]
+        votes.append(Vote(
+            address=fill.address.lower(),
+            direction=direction,
+            weight=weight,
+            price=fill.price,
+            ts=fill.ts,
+            notional=notional,
+            equity=None,
+        ))
+
+    directions = [v.direction for v in votes]
 
     # Gate 1: Dispersion (supermajority)
     passes, majority_dir = passes_consensus_gates(
@@ -1123,17 +1131,17 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
         return None
 
     # Get agreeing votes
-    agreeing_votes = [v for v in votes if v['direction'] == majority_dir]
+    agreeing_votes = [v for v in votes if v.direction == majority_dir]
 
     # Gate 2: Effective-K (correlation-adjusted)
-    weights = {v['address']: v['weight'] for v in agreeing_votes}
+    weights = {v.address: v.weight for v in agreeing_votes}
     eff_k = consensus_detector.eff_k_from_corr(weights)
 
     if eff_k < CONSENSUS_MIN_EFFECTIVE_K:
         return None
 
     # Calculate entry price (median of agreeing voters)
-    median_entry = statistics.median(v['price'] for v in agreeing_votes)
+    median_entry = statistics.median(v.price for v in agreeing_votes)
     mid_price = consensus_detector.get_current_mid(asset)
 
     # Stop price using ATR-based dynamic stop (or fallback to 1%)
@@ -1144,17 +1152,21 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
     else:
         stop_price = median_entry + stop_distance
 
-    # Gate 3: Price band check
-    if median_entry > 0 and mid_price > 0:
-        bps_deviation = abs(mid_price - median_entry) / median_entry * 10000
-        if bps_deviation > 8.0:  # Max price band
-            return None
+    # Gate 3: Latency + Price band check using centralized ATR-based R-unit logic
+    # Create a temporary window for the gate check
+    oldest_ts = min(v.ts for v in agreeing_votes)
+    temp_window = ConsensusWindow(
+        symbol=asset,
+        window_start=oldest_ts,
+        window_s=CONSENSUS_BASE_WINDOW_S,
+        fills=[],  # Fills not needed for latency/price gate check
+    )
+
+    if not consensus_detector.passes_latency_and_price_gates(temp_window, agreeing_votes):
+        return None
 
     # Gate 4: EV after costs
-    p_win = consensus_detector.calibrated_p_win(
-        [type('Vote', (), v)() for v in agreeing_votes],  # Convert dicts to objects
-        eff_k
-    )
+    p_win = consensus_detector.calibrated_p_win(agreeing_votes, eff_k)
     ev_result = calculate_ev(
         p_win=p_win,
         entry_px=median_entry,
@@ -1166,12 +1178,11 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
 
     # All gates passed! Create signal
     now = datetime.now(timezone.utc)
-    oldest_ts = min(v['ts'] for v in agreeing_votes)
     latency_ms = int((now - oldest_ts).total_seconds() * 1000)
     mid_delta_bps = abs(mid_price - median_entry) / median_entry * 10000 if median_entry > 0 else 0
 
     # Calculate dispersion
-    signed_weights = [(1 if v['direction'] == 'long' else -1) * v['weight'] for v in votes]
+    signed_weights = [(1 if v.direction == 'long' else -1) * v.weight for v in votes]
     dispersion = statistics.stdev(signed_weights) if len(signed_weights) > 1 else 0.0
 
     signal = ConsensusSignal(
@@ -1192,7 +1203,7 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
         median_voter_price=median_entry,
         mid_delta_bps=mid_delta_bps,
         created_at=now,
-        trigger_addresses=[v['address'] for v in agreeing_votes],
+        trigger_addresses=[v.address for v in agreeing_votes],
     )
 
     return signal
