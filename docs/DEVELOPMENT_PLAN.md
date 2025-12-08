@@ -1,603 +1,84 @@
 # SigmaPilot Development Plan
 
-## Business Goal
+## Vision
 
-> A private, single-tenant platform that continuously tracks Hyperliquid wallets, identifies consistently strong performers, filters out low-value activity (losers, noise traders, HFT churn), and uses an online-learning engine to generate risk-controlled trade recommendations. It can connect to a Hyperliquid account (read-only first, then trading) to execute a rules-based "follow-the-leaders" strategy that self-adapts as leaders change in bull or bear markets.
-
-### Core Principles
-
-1. **Not blind copy-trading** - Intelligently filter who and when to follow
-2. **Online learning** - Continuously adapt to changing market conditions and trader performance
-3. **Risk-controlled** - Kelly criterion position sizing, drawdown limits, exposure management
-4. **Self-adapting** - Automatically adjust to bull/bear markets and leader changes
-5. **Private single-tenant** - Your own instance, your own data, your own edge
+A collective intelligence trading system that learns from top Hyperliquid traders and generates consensus-based signals. Not blind copy-trading—intelligent filtering, Bayesian learning, and risk-controlled execution.
 
 ---
 
-## Chief Scientist Overview: The Algorithm
+## Roadmap Overview
 
-### The Problem We're Solving
-
-The naive approach to copy-trading fails for three reasons:
-
-1. **Selection Problem**: Which traders should we follow? Past performance on leaderboards doesn't predict future returns.
-2. **Correlation Problem**: Top traders often follow each other, so "5 traders agree" might really be "1 signal repeated 5 times."
-3. **Measurement Problem**: Win rate is misleading. A 30% win-rate trader making +5R on wins and -0.5R on losses is far better than an 80% win-rate trader making +0.2R/-0.5R.
-
-### Our Solution: Position-Based Bayesian Learning
-
-We solve these problems with a three-layer approach:
-
-#### Layer 1: Position Lifecycle Tracking
-
-Instead of treating every fill as a signal (which led to 20,000+ spam "signals" in 5 hours), we track **complete position lifecycles**:
-
-```
-Position Open (Open Long/Short) → Track entry
-Position Close (Close All) → Measure actual P&L
-```
-
-This means:
-- 1 position = 1 data point
-- We use Hyperliquid's `realized_pnl` for accuracy
-- R-multiple = realized_pnl / (entry_notional × assumed_stop)
-
-#### Layer 2: Normal-Inverse-Gamma (NIG) Posterior
-
-For each trader, we maintain a Bayesian estimate of their expected R-multiple:
-
-```
-μ | σ² ~ N(m, σ²/κ)     # Mean R given variance
-σ² ~ InverseGamma(α, β)  # Variance of R
-```
-
-**Why NIG instead of simple averages?**
-- Proper uncertainty quantification (new traders have wide posteriors)
-- Handles heavy-tailed R distributions (winsorize to ±2R)
-- Naturally balances exploration (uncertain traders) vs exploitation (proven performers)
-- Conjugate updates = fast, exact Bayesian inference
-
-**The update formula** (on position close with R-multiple `r`):
-```python
-κ' = κ + 1
-m' = (κ × m + r) / κ'
-α' = α + 0.5
-β' = β + 0.5 × κ × (r - m)² / κ'
-```
-
-#### Layer 3: Thompson Sampling for Selection
-
-Each selection round:
-1. Sample μ from each trader's posterior
-2. Rank by sampled value
-3. Select top K
-
-This naturally handles the explore/exploit tradeoff:
-- Uncertain traders (low κ) → wide samples → sometimes selected for exploration
-- Proven winners (high κ, high m) → narrow samples around high mean → usually selected
-
-#### Decay for Non-Stationarity
-
-Markets change. Last year's best trader may be this year's worst. We apply exponential decay toward the prior:
-
-```python
-# 34-day half-life (δ ≈ 0.98)
-κ' = 1 + (κ - 1) × δ
-m' = 0 + (m - 0) × δ
-α' = 3 + (α - 3) × δ
-β' = 1 + (β - 1) × δ
-```
-
-After ~100 days of inactivity, a trader's posterior returns to the uninformed prior.
-
-### What This Achieves
-
-| Metric | Before | After |
-|--------|--------|-------|
-| Signal definition | Every fill | Position open only |
-| Signals per day | 1000s (spam) | ~10-50 (real) |
-| Performance metric | Win rate | Expected R-multiple |
-| Uncertainty | Ignored | Quantified via posterior |
-| Adaptation | None | Exponential decay |
-
-### Future Layers (Phase 3+)
-
-1. **Consensus Detection**: Only act when multiple *independent* traders agree
-2. **Correlation Adjustment**: effK = K / (1 + (K-1)×ρ) accounts for correlated traders
-3. **EV Gating**: Only fire signals with positive expected value after costs
-4. **Kelly Sizing**: Position size based on confidence and bankroll
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1 | Foundation (leaderboard, streaming, dashboard) | ✅ Complete |
+| 2 | Trader Selection (position-based NIG bandit) | ✅ Complete |
+| 2.5 | Algorithm Refinements (episode builder, consensus gates) | ✅ Complete |
+| 3a | Alpha Pool UI & Runtime Wiring | ✅ Complete |
+| 3b | Core Algorithm (Thompson Sampling, ATR, Correlation) | ✅ Complete |
+| 3c | Observability & Hardening | ✅ Complete |
+| **4** | **Risk Management (Kelly criterion)** | 🔲 **Next** |
+| 5 | Market Regime Detection | 🔲 Planned |
+| 6 | Hyperliquid Read-Only Integration | 🔲 Planned |
+| 7 | Automated Execution | 🔲 Planned |
 
 ---
 
-## Current State (Phase 3b Complete - December 2025)
+## Current State: Phase 3 Complete
 
-### What's Built
+### What's Working
 
-#### Phase 1: Foundation (Complete)
-- [x] **Leaderboard Scanner** (`hl-scout`): Scans top 1000 traders, composite scoring
-- [x] **BTC/ETH Filtering**: Only tracks traders profitable on majors (≥10% contribution)
-- [x] **Real-time Fill Tracking** (`hl-stream`): WebSocket feeds for top N traders
-- [x] **Position Tracking**: Current positions with incremental updates
-- [x] **Dashboard**: Live clock, BTC/ETH prices, top performers, live fills
-- [x] **Streaming Aggregation**: Smart grouping of fills within time windows
-- [x] **Custom Account Tracking**: Add custom addresses to monitor (pinned accounts)
-- [x] **Historical Backfill**: Load more fills from Hyperliquid API
-
-#### Phase 2: Trader Selection Engine (Complete)
-- [x] **Thompson Sampling Bandit**: NIG posterior implementation
-- [x] **Position Lifecycle Tracking**: Open → Close with R-multiple calculation
-- [x] **Trader Performance Table**: NIG parameters (m, κ, α, β) per trader
-- [x] **Exponential Decay**: 34-day half-life toward prior
-- [x] **R-Winsorization**: Bounds to ±2R for heavy tail robustness
-- [x] **Dashboard UI**: Shows trader posteriors, positions, R-multiples
-
-#### Phase 2.5: Algorithm Refinements (Complete - December 2025)
-- [x] **Episode Builder** (`ts-lib/episode.ts`): VWAP entry/exit, sign-aware segmentation
-- [x] **Consensus Gates** (`ts-lib/consensus.ts`): 5-gate consensus detection
-- [x] **effK with Shrinkage**: `ρ' = λ×ρ_measured + (1-λ)×ρ_base` for stability
-- [x] **Price Drift in R-Units**: Drift gated as fraction of stop, not raw bps
-- [x] **Correlation Matrix Table**: `trader_corr` for pairwise correlations
-- [x] **Ticket Instrumentation**: Full audit trail for consensus decisions
-- [x] **Comprehensive Tests**: 35 episode tests + 29 consensus gate tests
-
-#### Quant Review Fixes (December 2025)
-Per external quant review, applied the following corrections:
-- [x] **NIG Update Atomicity**: SQL uses CTE with `FOR UPDATE` to read old params before update
-- [x] **USD Audit Fields**: Added `entry_notional_usd`, `risk_usd`, `fees_usd`, `funding_usd` for reconciliation
-- [x] **Hand-Verified Tests**: 18 quant acceptance tests with exact expected values
-- [x] **Flip Atomics**: Verified single-fill direction reversal emits close+open
-- [x] **effK Cluster Tests**: Two-cluster scenario with ρ_intra=0.8, ρ_inter=0 → effK≈2
-- [x] **EV Unit Tests**: Specific bps→R conversions (12 bps / 40 bps stop = 0.3R)
-
-#### Phase 3a: Alpha Pool & Runtime Integration (December 2025)
-Wired the algorithm components into the runtime and created the Alpha Pool UI:
-- [x] **Alpha Pool Tab**: New primary dashboard tab showing NIG-selected traders
-- [x] **Legacy Leaderboard Tab**: Original PnL-curve view preserved as secondary tab
-- [x] **Alpha Pool API** (`/alpha-pool`): Returns 50 traders ranked by NIG posterior mean
-- [x] **NIG Score Emission**: `hl-sage` emits scores with NIG posterior mean (not Thompson Sampling yet)
-- [x] **Consensus Runtime**: `hl-decide` processes fills through `ConsensusDetector` (with placeholder risk)
-- [x] **Consensus Signals Table**: `consensus_signals` DB table with outcome tracking
-- [x] **Consensus API** (`/consensus/signals`, `/consensus/stats`): Query signals and win rates
-- [x] **Self Code Review**: Verified all NIG functions, consensus integration, and file staging
-- [x] **Security**: OWNER_TOKEN fails-fast in production (NODE_ENV=production)
-- [x] **Alpha Pool Decoupling**: Fully separated from legacy leaderboard system
-- [x] **Dashboard UI Fixes**: Fixed tracked traders panel column width truncation (TRADES header)
-- [x] **HFT Detection Improvement**: Replaced VLM/AV ratio with orders-per-day via fill history analysis
-- [x] **PnL Curve Caching**: 24-hour cache for Alpha Pool PnL curves to reduce API calls
-- [x] **Alpha Pool Activity**: Live fills filtered to pool traders only
-- [x] **Auto-Refresh on Startup**: Alpha Pool auto-populates on first deployment (when DB empty)
-- [x] **API Retry Logic**: Exponential backoff for Hyperliquid API rate limits and timeouts
-- [x] **Cloud Deployment**: Render Blueprint with service orchestration and health checks
-
-#### Phase 3b: Core Algorithm Implementation (Complete - December 2025)
-Replaced all placeholder implementations with production-ready components:
-
-- [x] **Thompson Sampling** (`hl-sage/app/main.py`): Sample from NIG posterior instead of mean
-- [x] **NIG Weight Derivation**: ScoreEvent.weight = κ/(κ+10) for confidence-based weighting
-- [x] **ATR Provider** (`hl-decide/app/atr.py`): Dynamic stop distances from market volatility
-- [x] **Correlation Job** (`hl-decide/app/correlation.py`): Daily pairwise correlation computation
-- [x] **Episode Tracker** (`hl-decide/app/episode.py`): Position lifecycle with R-multiple calculation
-- [x] **Integration Tests** (`test_integration.py`): 41 tests covering complete signal flow
-- [x] **Operational Runbook** (`docs/RUNBOOK.md`): Health checks, monitoring, troubleshooting
-
-**Test Coverage**:
-| Component | Tests | File |
-|-----------|-------|------|
-| Thompson Sampling | 25 | `hl-sage/tests/test_thompson_sampling.py` |
-| ATR Provider | 29 | `hl-decide/tests/test_atr.py` |
-| Correlation | 40 | `hl-decide/tests/test_correlation.py` |
-| Episode Builder | 30 | `hl-decide/tests/test_episode.py` |
-| Integration | 41 | `hl-decide/tests/test_integration.py` |
-| **Total Python** | **151** | |
-| TypeScript Unit | 973 | `tests/*.test.ts` |
-| E2E (Playwright) | 150 | `e2e/*.spec.ts` |
-
-**Alpha Pool Architecture (Decoupled)**:
-The Alpha Pool is now a completely independent system from the legacy leaderboard:
-
-| Component | Alpha Pool (New) | Legacy Leaderboard |
-|-----------|------------------|-------------------|
-| **Address Source** | `alpha_pool_addresses` table | `hl_leaderboard_entries` table |
-| **PnL Curves** | Direct Hyperliquid API fetch | `hl_leaderboard_pnl_points` table |
-| **Nicknames** | `alpha_pool_addresses.nickname` | `hl_leaderboard_entries.remark` |
-| **Refresh** | `POST /alpha-pool/refresh` | hl-scout daily cron |
-| **Data Source** | `stats-data.hyperliquid.xyz` | hyperbot.network API |
-| **Quality Filters** | 7 quality gates (see below) | None |
-
-**Alpha Pool Quality Filters**:
-The refresh process applies 7 quality gates to filter out noise:
-
-| Filter | Threshold | Purpose |
-|--------|-----------|---------|
-| `ALPHA_POOL_MIN_PNL` | $10,000 | Positive 30d PnL (remove losers) |
-| `ALPHA_POOL_MIN_ROI` | 10% | Positive 30d ROI (consistent returns) |
-| `ALPHA_POOL_MIN_ACCOUNT_VALUE` | $100,000 | Minimum account size |
-| `ALPHA_POOL_MIN_WEEK_VLM` | $10,000 | Weekly volume (remove inactive) |
-| `ALPHA_POOL_MAX_ORDERS_PER_DAY` | 100 | Orders/day (remove HFT via fill history analysis) |
-| Subaccount check | N/A | Remove users with subaccounts (untrackable) |
-| BTC/ETH history | N/A | Must have traded BTC or ETH (we only track these) |
-
-**Key APIs**:
-- `POST /alpha-pool/refresh` - Populate Alpha Pool with quality filtering
-- `GET /alpha-pool` - Get traders with NIG posteriors and PnL curves
-- `GET /alpha-pool/addresses` - List addresses in the pool
-- `GET /alpha-pool/status` - NIG model statistics
-
-### Architecture
+**Core Algorithm Pipeline:**
 ```
-hl-scout (4101) → Leaderboard scanning, scoring, BTC/ETH filtering, candidate publishing
-     ↓ a.candidates.v1
-hl-sage (4103)  → Score computation, weight assignment, Thompson Sampling
-     ↓ b.scores.v1
-hl-stream (4102) → Real-time feeds, dashboard, WebSocket
-     ↓ c.fills.v1
-hl-decide (4104) → Position tracking, R-multiple calculation, NIG updates
+Leaderboard → Quality Filter → Alpha Pool → Thompson Sampling → Consensus → Signal
+   1000+          7 gates         50 traders      NIG posterior       5 gates
 ```
 
-### Key Files
+**Services:**
+| Service | Port | Function |
+|---------|------|----------|
+| hl-scout | 4101 | Leaderboard scanning, candidate publishing |
+| hl-stream | 4102 | Real-time feeds, dashboard, WebSocket |
+| hl-sage | 4103 | NIG model, Thompson Sampling selection |
+| hl-decide | 4104 | Consensus detection, episode tracking |
 
-| File | Purpose |
-|------|---------|
-| `services/hl-sage/app/bandit.py` | NIG posterior model, Thompson Sampling, Alpha Pool selection |
-| `services/hl-sage/app/main.py` | Score emission with NIG params, `/alpha-pool` API, pool refresh |
-| `services/hl-decide/app/main.py` | Position lifecycle, R calculation, consensus detection |
-| `services/hl-decide/app/consensus.py` | ConsensusDetector class, 5-gate consensus logic |
-| `packages/ts-lib/src/episode.ts` | Episode builder with VWAP, R-multiple calculation |
-| `packages/ts-lib/src/consensus.ts` | TypeScript consensus gates, effK with shrinkage |
-| `services/hl-stream/public/dashboard.html` | Dashboard with Alpha Pool + Legacy tabs |
-| `services/hl-stream/public/dashboard.js` | Tab switching, Alpha Pool rendering |
-| `db/migrations/014_position_signals.sql` | Position tracking schema |
-| `db/migrations/019_consensus_signals.sql` | Consensus signals with outcome tracking |
-| `db/migrations/020_alpha_pool.sql` | Alpha Pool addresses table (decoupled) |
-| `db/migrations/021_alpha_pool_roi.sql` | ROI column for quality filtering |
-| `tests/episode.test.ts` | Episode builder tests (35 tests) |
-| `tests/consensus-gates.test.ts` | Consensus gate tests (29 tests) |
-| `tests/quant-acceptance.test.ts` | Hand-verified quant acceptance tests (18 tests) |
-| `docs/POSITION_TRACKING_DESIGN.md` | Algorithm design document |
+**Test Coverage:**
+- TypeScript: 973 unit tests
+- Python: 164 tests (151 + 13 risk limits)
+- E2E: 150 Playwright tests
+
+### Phase 3c Additions (December 2025)
+
+**Rate Limiting:**
+- All Hyperliquid SDK calls rate-limited (2/s default)
+- Exponential backoff on 429 errors
+- Configurable via `HL_SDK_CALLS_PER_SECOND`
+
+**Observability Metrics:**
+| Metric | Purpose |
+|--------|---------|
+| `decide_atr_stale_total` | ATR data freshness |
+| `decide_atr_fallback_total` | Fallback usage tracking |
+| `decide_correlation_stale` | Correlation data freshness |
+| `decide_correlation_decay_factor` | Decay applied to correlations |
+| `decide_effk_value` | Effective-K distribution |
+| `decide_vote_weight_gini` | Weight concentration (0=equal, 1=concentrated) |
+| `decide_signal_risk_rejected_total` | Risk limit rejections |
+| `decide_signal_generated_total` | Signals passing all gates |
+
+**Risk Fail-Safes:**
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `MAX_POSITION_SIZE_PCT` | 2% | Per-position limit |
+| `MAX_TOTAL_EXPOSURE_PCT` | 10% | Total exposure cap |
+| `MAX_DAILY_LOSS_PCT` | 5% | Drawdown halt |
+| `MIN_SIGNAL_CONFIDENCE` | 55% | Minimum win probability |
+| `MIN_SIGNAL_EV_R` | 0.20R | Minimum expected value |
+| `MAX_LEVERAGE` | 1x | No leverage until Kelly |
+| `SIGNAL_COOLDOWN_SECONDS` | 300s | Anti rapid-fire |
 
 ---
 
-## Phase 2: Position-Based Trader Selection (COMPLETE)
-
-### Implementation Summary
-
-#### 2.1 Position Lifecycle Tracking
-
-**What triggers a signal?**
-- `Open Long (Open New)` - Position goes from 0 → positive
-- `Open Short (Open New)` - Position goes from 0 → negative
-
-**What's ignored?**
-- `Increase Long/Short` - Adding to existing position
-- `Decrease Long/Short` - Partial close
-
-**What closes a signal?**
-- `Close Long (Close All)` - Position returns to 0
-- `Close Short (Close All)` - Position returns to 0
-
-#### 2.2 R-Multiple Calculation
-
-```python
-# When position closes
-entry_notional = entry_price × entry_size
-risk_amount = entry_notional × ASSUMED_STOP_FRACTION  # 1% default
-
-# Use Hyperliquid's realized_pnl
-result_r = realized_pnl / risk_amount
-
-# Winsorize to ±2R
-result_r = max(-2.0, min(2.0, result_r))
-```
-
-#### 2.3 NIG Posterior Update
-
-```sql
--- On position close with R-multiple r
-UPDATE trader_performance SET
-    nig_kappa = nig_kappa + 1,
-    nig_m = (nig_kappa * nig_m + r) / (nig_kappa + 1),
-    nig_alpha = nig_alpha + 0.5,
-    nig_beta = nig_beta + 0.5 * nig_kappa * (r - nig_m)^2 / (nig_kappa + 1),
-    positions_closed = positions_closed + 1,
-    positions_won = positions_won + CASE WHEN r > 0 THEN 1 ELSE 0 END
-WHERE address = $1
-```
-
-#### 2.4 Database Schema
-
-```sql
--- Position lifecycle tracking
-CREATE TABLE position_signals (
-    id UUID PRIMARY KEY,
-    address TEXT NOT NULL,
-    asset TEXT NOT NULL,
-    direction TEXT NOT NULL,  -- 'long' or 'short'
-
-    -- Entry
-    entry_fill_id TEXT NOT NULL UNIQUE,
-    entry_price DOUBLE PRECISION NOT NULL,
-    entry_size DOUBLE PRECISION NOT NULL,
-    entry_ts TIMESTAMPTZ NOT NULL,
-
-    -- Exit (NULL until closed)
-    exit_fill_id TEXT,
-    exit_price DOUBLE PRECISION,
-    exit_ts TIMESTAMPTZ,
-    realized_pnl DOUBLE PRECISION,
-    result_r DOUBLE PRECISION,
-
-    status TEXT DEFAULT 'open',  -- 'open', 'closed', 'expired'
-    closed_reason TEXT
-);
-
--- Trader performance with NIG parameters
-ALTER TABLE trader_performance ADD COLUMN
-    nig_m DOUBLE PRECISION DEFAULT 0.0,
-    nig_kappa DOUBLE PRECISION DEFAULT 1.0,
-    nig_alpha DOUBLE PRECISION DEFAULT 3.0,
-    nig_beta DOUBLE PRECISION DEFAULT 1.0,
-    positions_opened INTEGER DEFAULT 0,
-    positions_closed INTEGER DEFAULT 0,
-    positions_won INTEGER DEFAULT 0;
-```
-
-#### 2.5 API Endpoints
-
-- `GET /positions/open` - Currently tracked open positions
-- `GET /positions/recent` - Recently closed positions with R-multiples
-- `GET /healthz` - Includes open position count
-
----
-
-## Phase 3: Consensus Signal Generation
-
-### Goal
-Generate trading signals when multiple selected traders take the same position. Filter noise by requiring consensus with **correlation adjustment** and **EV gating**.
-
-### Key Innovation: Correlation-Adjusted Effective-K with Shrinkage
-
-Raw trader counts are misleading when traders are correlated. The **effective-K** formula:
-
-```
-effK = (Σᵢ wᵢ)² / Σᵢ Σⱼ wᵢ wⱼ ρᵢⱼ
-```
-
-**Stability via Shrinkage**: To handle noisy correlation estimates:
-```
-ρ' = λ × ρ_measured + (1-λ) × ρ_base
-```
-Where `λ = 0.7` (70% measured, 30% prior) and `ρ_base = 0.3`.
-
-**Example**: 5 traders with 80% measured correlation → shrunk ρ ≈ 0.65 → effK ≈ 1.4
-
-### Implementation Status (ts-lib/consensus.ts)
-
-#### ✅ Implemented Gates
-
-| Gate | Description | Config |
-|------|-------------|--------|
-| Supermajority | ≥70% agreement, ≥3 traders | `minTraders=3, minPct=0.7` |
-| Effective-K | Correlation-adjusted ≥ 2.0 | `minEffectiveK=2.0` |
-| Freshness | Oldest vote < 1.25× window | `maxStalenessFactor=1.25` |
-| Price Drift | Drift < 0.25R from median | `maxPriceDriftR=0.25` |
-| EV Gate | Net EV ≥ 0.2R after costs | `evMinR=0.2` |
-
-#### ✅ Key Functions
-
-```typescript
-// Full consensus check with all 5 gates
-checkConsensus(votes, currentMidPrice, windowMs, stopBps, correlationMatrix, traderWinRates, config)
-
-// Individual gates
-checkSupermajority(votes, config)
-calculateEffectiveK(weights, correlationMatrix, config)  // With shrinkage
-checkFreshness(votes, windowMs, config)
-checkPriceDrift(votes, currentMidPrice, stopBps, config)  // In R-units
-calculateEV(pWin, stopBps, config)
-estimateWinProbability(votes, traderWinRates)  // Shrunk toward 0.5
-
-// Ticket instrumentation for audit
-createTicketInstrumentation(result, windowMs, stopBps)
-```
-
-### Completed Integration Tasks
-
-#### 3.1 Alpha Pool UI & API
-- [x] Dashboard tabs: "Alpha Pool" (default) and "Legacy Leaderboard"
-- [x] `/alpha-pool` API returns NIG-ranked traders with posterior params
-- [x] Alpha Pool table shows μ, κ, σ, signals, avg_r, selection status
-- [x] Alpha Pool Activity feed filters fills to pool traders only
-
-#### 3.2 Runtime Wiring
-- [x] `hl-sage/main.py`: Score emission includes NIG params in meta
-- [x] `hl-decide/main.py`: Fills processed through `ConsensusDetector`
-- [x] Consensus signals published to `d.signals.v1` NATS topic
-- [x] Consensus signals persisted to `consensus_signals` table
-
-#### 3.3 Consensus Signal API
-- [x] `/consensus/signals` - Recent signals with metrics and outcomes
-- [x] `/consensus/stats` - Aggregate win rate, EV statistics
-
-### Known Implementation Gaps (Code Review - December 2025)
-
-The following gaps exist between the documented design and current implementation:
-
-#### Gap 1: Selection Uses Posterior Mean, Not Thompson Sampling - RESOLVED
-**Status**: ✅ Fixed in December 2025
-**Solution**: `hl-sage/main.py:handle_fill()` now uses Thompson Sampling from `TraderPosteriorNIG.sample()` instead of posterior mean. The `score_source` is now `"thompson"` instead of `"nig"`. Low-κ traders (uncertain) get wider samples, enabling exploration of new traders alongside exploitation of proven performers.
-
-#### Gap 2: Consensus Gates Use Placeholder Risk Inputs - RESOLVED
-**Status**: ✅ Fixed in December 2025
-**Solution**: Created ATR provider (`app/atr.py`) that:
-- Calculates ATR from `marks_1m` price history (or pre-computed `atr14` column)
-- Uses asset-specific multipliers (BTC: 2.0x, ETH: 1.5x) for stop distances
-- Updates `ConsensusDetector.stop_fractions` via `set_stop_fraction()` on startup
-- Falls back to 1% stop if no ATR data available
-- Caches ATR values for 60 seconds to minimize DB queries
-
-#### Gap 3: Correlation Matrix Not Populated - RESOLVED
-**Status**: ✅ Fixed in December 2025
-**Solution**: Created correlation provider (`app/correlation.py`) that:
-- Computes sign vectors from episode_fills in 5-minute buckets
-- Calculates phi/Kendall correlation for all Alpha Pool trader pairs
-- Stores results in `trader_corr` table with automatic pruning
-- Hydrates `ConsensusDetector.correlation_matrix` on startup
-- API endpoints: `POST /correlation/compute` (trigger job), `GET /correlation/status`
-- Correlation is clipped to [0,1] (negative = independent for effK purposes)
-
-#### Gap 4: Position Lifecycle/Episodes Not Integrated - RESOLVED
-**Status**: ✅ Fixed in December 2025
-**Solution**: Ported episode builder to Python (`hl-decide/app/episode.py`). The `EpisodeTracker` now:
-- Tracks ALL fills (not just Open New / Close All)
-- Builds complete position episodes with VWAP entry/exit
-- Calculates R-multiples when positions close
-- Updates NIG posteriors from episode outcomes
-- Persists episode fills to `episode_fills` table
-- Derives one vote per trader from open episodes (not per fill)
-
-#### Gap 5: Vote Weighting Unscaled - RESOLVED
-**Status**: ✅ Fixed in December 2025
-**Solution**: Vote weights now normalized by notional ($100k base), capped at 1.0. The `check_episode_consensus()` function in `main.py` uses `weight = min(notional / 100000, 1.0)` for proper scaling.
-
-#### Gap 6: ScoreEvent Weight Uses Legacy Leaderboard Value - RESOLVED
-**Status**: ✅ Fixed in December 2025
-**Solution**: `hl-sage/main.py:handle_fill()` now derives weight from NIG confidence using `κ/(κ+10)`. This gives weight ~0.09 for new traders (κ=1), ~0.5 for κ=10, and ~0.91 for experienced traders (κ=100). Legacy leaderboard weight is only used as fallback when no NIG posterior exists.
-
-#### Gap 7: E2E Tests Fragile and Require Manual Setup
-**Current**: `playwright.config.ts` has `webServer` commented out; specs use loose selectors and often short-circuit when elements aren't present. Tests don't assert backend effects (pin/unpin responses).
-**Designed**: Tests should be self-contained with automatic app startup and verify state changes.
-**Impact**: CI/CD may fail if dashboard not pre-started; tests may pass without verifying functionality.
-**Fix**: Enable webServer config, add `data-testid` selectors, assert backend responses for pin/unpin operations.
-
-#### Gap 8: CI Runs Unit Tests Only, Not E2E
-**Current**: CI workflow runs `npm run test:coverage` (Jest unit tests). Quant tests ARE included. E2E (Playwright) not run.
-**Impact**: UI regressions won't be caught in CI; only unit-level algorithm tests run.
-**Fix**: Add Docker-based E2E stage to CI or document that E2E is manual-only.
-
-### Peer Review Findings & Fixes (December 2025)
-
-External peer review identified runtime gaps between documented design and actual implementation. Below are the findings and resolutions:
-
-#### Finding 1: Consensus Used Hardcoded Stop Instead of ATR
-**Issue**: `check_episode_consensus()` in `main.py` used `ASSUMED_STOP_FRACTION` (1%) instead of `consensus_detector.get_stop_fraction()`.
-**Fix Applied**: Changed line 897 to use `consensus_detector.get_stop_fraction(asset)`.
-**Verification**: Added 4 new tests in `TestATRToConsensusFlow` class (26 total integration tests passing).
-
-#### Finding 2: Correlation Job Not Automatically Triggered
-**Issue**: Correlation computation only runs via manual API call (`POST /correlation/compute`).
-**Fix Applied**: Added startup trigger - if no correlations exist, `run_daily_correlation_job()` is called on service startup.
-**Verification**: Startup logs now show correlation computation attempt when DB empty.
-
-#### Finding 3: Vote Weighting Already Correct
-**Verified**: `check_episode_consensus()` at line 860-861 already uses `weight = min(notional / 100000, 1.0)` for notional-based normalization.
-
-#### Finding 4: Thompson Sampling Already Active
-**Verified**: `hl-sage/app/main.py` lines 248-276 use `posterior.sample()` for Thompson Sampling and derive weight from `κ/(κ+10)`.
-
-#### Finding 5: Episodes Already Integrated
-**Verified**: `handle_fill_via_episodes()` processes all fills, `persist_closed_episode()` updates NIG posteriors, votes derived from open episodes via `process_fill_for_consensus_via_episodes()`.
-
-**Summary**: Core algorithm is now fully wired. Remaining gaps (E2E test hardening, CI E2E stage) are deferred to Phase 4.
-
-### Quant Review Watchpoints (December 2025)
-
-The following areas require careful attention during Phase 3b implementation:
-
-1. **Volatility Inputs**: EV gate, price-band gate, and latency calculations depend on ATR or similar. Must source/refresh real volatility data, not fixed constants. Consider per-asset ATR from `marks_1m`.
-
-2. **Correlation Estimation**: effK needs live pairwise correlations; default ρ=0.3 is only a fallback. Define:
-   - Window size for correlation calculation (e.g., 30 days)
-   - Decay mechanism for stale correlations
-   - Asset-specific vs cross-asset correlations
-   - Regime-aware correlation adjustments
-
-3. **Stop/Risk Policy**: Fixed 1% stops are not robust across market conditions. Tie stop distance to:
-   - ATR multiplier (e.g., 2× ATR for BTC, 1.5× for ETH)
-   - Regime-specific multipliers (trending vs ranging vs volatile)
-
-4. **Vote Weighting**: Weights should reflect notional/equity risk, not raw size counts. Define:
-   - Normalization: `position_notional / account_equity`
-   - Caps based on risk contribution, not arbitrary size=1.0
-
-5. **Explore/Exploit Balance**: Thompson Sampling must drive selection in production. Mean-only rankings miss:
-   - Uncertainty quantification (wide posteriors should explore)
-   - Adaptation to changing trader performance
-   - New trader discovery
-
-6. **Data Hygiene**: Position episodes need tight validation:
-   - No overlapping fills within same episode
-   - Sign flips correctly split episodes (close + reopen)
-   - Entry/exit timestamps match fill sequences
-
-### Remaining Integration Tasks (Phase 3b)
-
-#### 3.4 Thompson Sampling for Candidate Selection (COMPLETE - December 2025)
-- [x] Replace posterior-mean ranking with actual Thompson Sampling
-- [x] Invoke `thompson_sample_select_nig()` in hl-sage score emission pipeline (not just admin endpoints)
-- [x] Configure exploration_ratio for new trader discovery (inherent in Thompson Sampling variance)
-- [x] Add uncertainty bonus for traders with low κ (few observations) (inherent in NIG posterior variance)
-- [x] Derive ScoreEvent.weight from posterior (e.g., `κ/(κ+10)`) instead of legacy leaderboard weight
-- [x] 25 Python tests for Thompson Sampling (`test_thompson_sampling.py`)
-
-#### 3.5 Daily Correlation Job (COMPLETE - December 2025)
-- [x] Compute 5-minute bucket sign vectors per trader (`app/correlation.py:build_sign_vectors()`)
-- [x] Calculate pairwise correlation from co-occurrence (`compute_phi_correlation()`)
-- [x] Store in `trader_corr` table (already migrated) (`store_correlations()`)
-- [x] Hydrate `ConsensusDetector.correlation_matrix` on startup (`CorrelationProvider.hydrate_detector()`)
-- [x] Prune entries older than 30 days (`prune_old_correlations()`)
-- [x] API endpoints: `POST /correlation/compute`, `GET /correlation/status`
-- [x] 23 Python tests for correlation calculation (`test_correlation.py`)
-
-#### 3.6 Dynamic Risk Inputs (COMPLETE - December 2025)
-- [x] Add ATR calculation from `marks_1m` price history (`app/atr.py`)
-- [x] Replace hardcoded 1% stop with ATR-based stop distance
-- [x] Pass dynamic stop_bps to consensus gates (`ConsensusDetector.set_stop_fraction()`)
-- [x] Consider regime-specific ATR multipliers (BTC: 2.0x, ETH: 1.5x default)
-- [x] 22 Python tests for ATR provider (`test_atr.py`)
-
-#### 3.7 Episode-Based Votes & Position Lifecycle (COMPLETE - December 2025)
-- [x] Wire episode builder from ts-lib to hl-decide runtime (Python port in `episode.py`)
-- [x] One vote per trader derived from position lifecycle, not individual fills
-- [x] Calculate R-multiples on position close and update NIG posteriors
-- [x] Normalize vote weights by notional/equity (normalized by $100k, capped at 1.0)
-- [x] Track position entry/exit for proper R calculation (VWAP-based)
-- [x] Validate episode data hygiene (no overlaps, sign flips split correctly)
-- [x] Add `episode_fills` table for multi-fill tracking per episode
-- [x] 30 Python tests for episode builder (`test_episode.py`)
-
-#### 3.8 Testing & CI Hardening (COMPLETE - December 2025)
-- [x] Add integration tests for Thompson Sampling selection path (22 tests in `test_integration.py`)
-- [x] Add integration tests for consensus with real correlation/ATR
-- [x] Add integration tests for episode construction and R calculation
-- [x] Document runbook: `docs/RUNBOOK.md` (health checks, monitoring, troubleshooting)
-- [ ] Tighten Playwright assertions if keeping E2E tests (deferred to Phase 4)
-
-### Suggested Implementation Order (Priority) - ALL COMPLETE ✅
-
-Phase 3b implementation completed in December 2025:
-
-1. ✅ **Episode Integration** (3.7) - Foundation for R-multiples and NIG updates
-2. ✅ **Thompson Sampling** (3.4) - Enable explore/exploit in production
-3. ✅ **Dynamic Risk/ATR** (3.6) - Real volatility for EV/price gates
-4. ✅ **Correlation Job** (3.5) - Real effK for independence gate
-5. ✅ **Testing/CI** (3.8) - Integration tests and operational runbook
-
-### Environment Variables
-```bash
-CONSENSUS_MIN_TRADERS=3
-CONSENSUS_MIN_PCT=0.70
-CONSENSUS_MIN_EFFECTIVE_K=2.0
-CONSENSUS_BASE_WINDOW_S=120
-CONSENSUS_MAX_STALENESS_FACTOR=1.25
-CONSENSUS_MAX_PRICE_DRIFT_R=0.25      # Now in R-units, not bps
-CONSENSUS_EV_MIN_R=0.20
-CONSENSUS_DEFAULT_CORRELATION=0.3     # ρ_base for shrinkage
-CONSENSUS_CORRELATION_SHRINKAGE=0.7   # λ (70% measured, 30% prior)
-```
-
----
-
-## Phase 4: Risk Management & Position Sizing
+## Phase 4: Risk Management (Next)
 
 ### Goal
 Implement Kelly criterion position sizing with practical guardrails.
@@ -607,340 +88,217 @@ Implement Kelly criterion position sizing with practical guardrails.
 #### 4.1 Kelly Calculator
 ```python
 def kelly_fraction(win_rate, avg_win_r, avg_loss_r):
+    """Calculate optimal bet fraction using Kelly criterion."""
     R = avg_win_r / avg_loss_r
     kelly = win_rate - (1 - win_rate) / R
     return max(0, min(kelly, 1))
 
-def position_size(kelly, fraction=0.25, account_value):
+def position_size(kelly, account_value, fraction=0.25):
+    """Apply fractional Kelly for conservative sizing."""
     return kelly * fraction * account_value
 ```
 
-#### 4.2 Risk Limits
-- Max position size: 5% of account
-- Max total exposure: 20%
-- Max concurrent signals: 3
-- Daily drawdown limit: -10%
+#### 4.2 Risk Limits (Enforce)
+- [ ] Max position size: 5% of account
+- [ ] Max total exposure: 20%
+- [ ] Max concurrent positions: 3
+- [ ] Daily drawdown limit: -10%
+- [ ] Implement real-time exposure tracking
+
+#### 4.3 Paper Trading Mode
+- [ ] Simulation mode to validate signals
+- [ ] Track simulated P&L without execution
+- [ ] Compare signals vs actual market moves
+
+#### 4.4 Signal Cooldown
+- [ ] Implement per-symbol cooldown (already configured: 300s)
+- [ ] Track last signal time per asset
+- [ ] Reject rapid-fire signals
+
+#### 4.5 E2E Test Hardening
+- [ ] Add `data-testid` selectors to dashboard
+- [ ] Enable `webServer` in Playwright config
+- [ ] Assert backend state changes (not just UI)
 
 ---
 
 ## Phase 5: Market Regime Detection
 
 ### Goal
-Detect market regime (trending, ranging, volatile) and adjust strategy parameters.
+Adapt strategy parameters based on market conditions.
 
-### Simple Regime Detection
-```python
-def detect_regime(prices, atr):
-    ma20, ma50 = np.mean(prices[-20:]), np.mean(prices[-50:])
-    trend = (ma20 - ma50) / ma50
-    volatility = atr / prices[-1]
+### Regime Types
+| Regime | Detection | Response |
+|--------|-----------|----------|
+| Trending | MA20 > MA50 + 2%, low vol | Wider stops, higher Kelly |
+| Ranging | MAs converged, low vol | Tighter stops, lower Kelly |
+| Volatile | High ATR/price ratio | Conservative sizing |
 
-    if abs(trend) > 0.02 and volatility < 0.03: return "trending"
-    elif abs(trend) < 0.01 and volatility < 0.02: return "ranging"
-    else: return "volatile"
-```
-
-### Regime-Specific Parameters
-| Regime | Consensus Min | Kelly Fraction | Stop ATR Mult |
-|--------|--------------|----------------|---------------|
-| Trending | 2 | 0.35 | 2.0 |
-| Ranging | 4 | 0.15 | 1.0 |
-| Volatile | 5 | 0.10 | 1.5 |
+### Tasks
+- [ ] Implement regime classifier
+- [ ] Add regime-specific parameter sets
+- [ ] Auto-adjust consensus thresholds
+- [ ] Backtest regime transitions
 
 ---
 
-## Phase 6-7: Hyperliquid Integration & Execution
+## Phase 6-7: Execution
 
-(See original plan - unchanged)
+### Phase 6: Read-Only Integration
+- [ ] Connect to Hyperliquid API (read-only)
+- [ ] Track account positions
+- [ ] Monitor fills for paper trading
+
+### Phase 7: Automated Execution
+- [ ] Implement order placement
+- [ ] Position management (stop-loss, take-profit)
+- [ ] Risk circuit breakers
+
+---
+
+## Architecture
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  hl-scout   │────▶│  hl-sage    │────▶│  hl-stream  │────▶│  hl-decide  │
+│   :4101     │     │   :4103     │     │   :4102     │     │   :4104     │
+├─────────────┤     ├─────────────┤     ├─────────────┤     ├─────────────┤
+│ Leaderboard │     │ NIG Model   │     │ Dashboard   │     │ Consensus   │
+│ Scanning    │     │ Thompson    │     │ WebSocket   │     │ Detection   │
+│ Filtering   │     │ Sampling    │     │ Fills       │     │ Episodes    │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+       │                   │                   │                   │
+       └───────────────────┴───────────────────┴───────────────────┘
+                                    │
+                              ┌─────┴─────┐
+                              │  NATS     │
+                              │ PostgreSQL│
+                              └───────────┘
+```
+
+### Key Files
+
+| Component | File |
+|-----------|------|
+| NIG Model | `services/hl-sage/app/bandit.py` |
+| Thompson Sampling | `services/hl-sage/app/main.py` |
+| Consensus Detection | `services/hl-decide/app/consensus.py` |
+| ATR Provider | `services/hl-decide/app/atr.py` |
+| Correlation | `services/hl-decide/app/correlation.py` |
+| Episode Tracker | `services/hl-decide/app/episode.py` |
+| Dashboard | `services/hl-stream/public/dashboard.html` |
 
 ---
 
 ## Configuration Reference
 
-### Current Environment Variables
+### Core Settings
 ```bash
-# Existing
-OWNER_TOKEN=dev-owner
+# Services
 NATS_URL=nats://nats:4222
 DATABASE_URL=postgresql://hlbot:hlbotpassword@postgres:5432/hlbot
+OWNER_TOKEN=your-secret-token
 
-# Phase 2: Position Tracking
-ASSUMED_STOP_FRACTION=0.01           # 1% stop for R calculation
-
-# Phase 2: Bandit (Thompson Sampling)
-BANDIT_POOL_SIZE=50
-BANDIT_SELECT_K=10
-BANDIT_MIN_SAMPLES=30
-BANDIT_DECAY_HALF_LIFE_DAYS=34       # δ ≈ 0.98
-
-# NIG Prior
-NIG_PRIOR_M=0.0
-NIG_PRIOR_KAPPA=1.0
-NIG_PRIOR_ALPHA=3.0
-NIG_PRIOR_BETA=1.0
-R_WINSORIZE_MIN=-2.0
-R_WINSORIZE_MAX=2.0
-
-# Phase 3: Consensus
+# Consensus Gates
 CONSENSUS_MIN_TRADERS=3
 CONSENSUS_MIN_PCT=0.70
 CONSENSUS_MIN_EFFECTIVE_K=2.0
 CONSENSUS_EV_MIN_R=0.20
+CONSENSUS_MAX_PRICE_DRIFT_R=0.25
+
+# ATR & Volatility
+ATR_MULTIPLIER_BTC=2.0
+ATR_MULTIPLIER_ETH=1.5
+ATR_STRICT_MODE=true
+ATR_MAX_STALENESS_SECONDS=300
+
+# Correlation
+CORR_DECAY_HALFLIFE_DAYS=3.0
+CORR_REFRESH_INTERVAL_HOURS=24
+DEFAULT_CORRELATION=0.3
+
+# Vote Weighting
+VOTE_WEIGHT_MODE=log              # log, equity, or linear
+VOTE_WEIGHT_LOG_BASE=10000.0
+VOTE_WEIGHT_MAX=1.0
+
+# Risk Limits (Phase 3c fail-safes)
+MAX_POSITION_SIZE_PCT=2.0
+MAX_TOTAL_EXPOSURE_PCT=10.0
+MAX_DAILY_LOSS_PCT=5.0
+MIN_SIGNAL_CONFIDENCE=0.55
+MAX_LEVERAGE=1.0
+SIGNAL_COOLDOWN_SECONDS=300
 
 # Alpha Pool Quality Filters
-ALPHA_POOL_MIN_PNL=10000             # Min $10k 30d PnL
-ALPHA_POOL_MIN_ROI=0.10              # Min 10% 30d ROI
-ALPHA_POOL_MIN_ACCOUNT_VALUE=100000  # Min $100k account value
-ALPHA_POOL_MIN_WEEK_VLM=10000        # Min $10k weekly volume (filter inactive)
-ALPHA_POOL_MAX_ORDERS_PER_DAY=100    # Max 100 orders/day (filter HFT via fill history)
+ALPHA_POOL_MIN_PNL=10000
+ALPHA_POOL_MIN_ROI=0.10
+ALPHA_POOL_MIN_ACCOUNT_VALUE=100000
+ALPHA_POOL_MAX_ORDERS_PER_DAY=100
 ```
 
 ---
 
-## Milestones
+## Quick Start
 
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 1 | Foundation (leaderboard, streaming, dashboard) | ✅ Complete |
-| 2 | Trader Selection (position-based NIG bandit) | ✅ Complete |
-| 2.5 | Algorithm Refinements (episode builder, consensus gates) | ✅ Complete |
-| 3a | Alpha Pool UI & Runtime Wiring | ✅ Complete |
-| 3b | Correlation Job & Episode Votes | ✅ Complete |
-| 4 | Risk Management (Kelly criterion) | 🔲 Not started |
-| 5 | Market Regime Detection | 🔲 Not started |
-| 6 | Hyperliquid Read-Only Integration | 🔲 Not started |
-| 7 | Automated Execution | 🔲 Not started |
-
----
-
-## Validation Checklist
-
-### Phase 2 Tests (Position-Based Tracking)
-- [x] Position open creates signal with entry info
-- [x] Position close calculates R-multiple from realized_pnl
-- [x] NIG posterior updates correctly on close
-- [x] Increase/Decrease fills are ignored
-- [x] Duplicate fill_ids are rejected (unique constraint)
-- [x] Data reset clears corrupted fill-level spam
-
-### Phase 2.5 Tests (Algorithm Refinements)
-- [x] Episode builder: VWAP calculation for entries/exits
-- [x] Episode builder: Sign-aware position segmentation
-- [x] Episode builder: Direction flip handling (close + reopen)
-- [x] Episode builder: R-multiple with winsorization to ±2R
-- [x] Episode builder: Partial close tracking
-- [x] Consensus: Supermajority gate (≥70%, ≥3 traders)
-- [x] Consensus: Effective-K with shrinkage stability
-- [x] Consensus: Freshness gate (staleness factor)
-- [x] Consensus: Price drift in R-units (not raw bps)
-- [x] Consensus: EV gate with cost conversion to R
-- [x] Consensus: Win probability estimation with shrinkage
-
-### Quant Acceptance Tests (December 2025)
-Per quant review, added 18 hand-verified acceptance tests in `tests/quant-acceptance.test.ts`:
-- [x] R audit: +$1000 on $50k entry with 1% stop → R=2.0
-- [x] R audit: -$2000 on $80k short → R=-2.0 (clamped)
-- [x] R audit: Small winner with fees → R=0.47
-- [x] R audit: VWAP across multiple entry fills
-- [x] Flip atomics: Single fill reverses sign → close + open
-- [x] Flip atomics: Short-to-long direction flip
-- [x] Consensus dedupe: 100 micro-fills = 1 vote (effK=1)
-- [x] effK extreme: 5 perfectly correlated traders → effK≈1
-- [x] effK extreme: Two uncorrelated clusters → effK≈2
-- [x] effK: 4 traders with ρ=0.5 → effK=1.6
-- [x] EV units: 12 bps cost / 40 bps stop = 0.3R
-- [x] EV units: 17 bps cost / 100 bps stop = 0.17R
-- [x] EV calculation with specific p_win and costs
-- [x] EV: Tighter stop doubles cost impact
-- [x] EV gate rejects when net EV < threshold
-- [x] Stop basis consistency between entry and exit
-- [x] Stop basis recorded at entry for audit
-
-### Upcoming Tests (Phase 3 Integration)
-- [ ] One vote per trader derived from episode state
-- [ ] Daily correlation job computes pairwise ρ
-- [ ] End-to-end consensus → ticket → outcome flow
-
-### Code Review Verification (December 2025)
-
-Self code review verified the following runtime integrations:
-
-| Component | File | Function/Class | Status |
-|-----------|------|----------------|--------|
-| NIG Posterior | `bandit.py:503` | `get_trader_posteriors_nig()` | ✅ Verified |
-| NIG Selection | `bandit.py:556` | `thompson_sample_select_nig()` | ✅ Verified |
-| NIG Status | `bandit.py:664` | `get_bandit_status_nig()` | ✅ Verified |
-| NIG Update | `bandit.py:589` | `update_trader_nig()` | ✅ Verified |
-| Consensus Detector | `consensus.py:124` | `ConsensusDetector` class | ✅ Verified |
-| 5-Gate Check | `consensus.py:192` | `check_consensus()` | ✅ Verified |
-| Score Emission | `main.py:221-250` | NIG params in `ScoreEvent.meta` | ✅ Verified |
-| Fill Processing | `main.py:510-543` | `process_fill_for_consensus()` | ✅ Verified |
-
-**Test Results**:
-- Jest: 955 tests passing (includes 8 new HFT filter tests)
-- Playwright E2E: 128 tests passing (6 skipped)
-
-**Files Staged**: 14 new files + modified services ready for commit.
-
----
-
-## How to Resume Development
-
-1. **Check this document** for current phase
-2. **Review phase tasks** - pick next uncompleted item
-3. **Run services**: `docker compose up -d`
-4. **Dashboard**: http://localhost:4102/dashboard (Alpha Pool tab is default)
-5. **Logs**: `docker compose logs -f [service-name]`
-6. **Run tests**: `npm test` (955 unit tests); E2E requires dashboard running first
-
-### Key Files by Phase
-
-**Phase 2 (Complete)**:
-- `services/hl-sage/app/bandit.py` - NIG model
-- `services/hl-decide/app/main.py` - Position tracking
-- `db/migrations/014_position_signals.sql` - Schema
-
-**Phase 2.5 (Complete)**:
-- `packages/ts-lib/src/episode.ts` - Episode builder (VWAP, R-multiple)
-- `packages/ts-lib/src/consensus.ts` - 5-gate consensus detection
-- `services/hl-sage/app/bandit.py` - NIG update with CTE for atomicity
-- `tests/episode.test.ts` - 35 episode tests
-- `tests/consensus-gates.test.ts` - 29 consensus gate tests
-- `tests/quant-acceptance.test.ts` - 18 hand-verified quant acceptance tests
-- `db/migrations/015_episode_fields.sql` - VWAP/R audit columns
-- `db/migrations/016_trader_correlation.sql` - Correlation matrix table
-- `db/migrations/017_consensus_instrumentation.sql` - Ticket audit columns
-- `db/migrations/018_episode_usd_fields.sql` - USD-denominated audit fields
-
-**Phase 3a (Complete - Alpha Pool Runtime)**:
-- `services/hl-sage/app/main.py` - `/alpha-pool` endpoint, NIG in score emission
-- `services/hl-sage/app/bandit.py` - NIG functions: `get_trader_posteriors_nig`, `thompson_sample_select_nig`, `get_bandit_status_nig`
-- `services/hl-decide/app/main.py` - Consensus detection via `process_fill_for_consensus()`
-- `services/hl-decide/app/consensus.py` - ConsensusDetector class with 5-gate logic
-- `services/hl-stream/public/dashboard.html` - Tabs (Alpha Pool + Legacy)
-- `services/hl-stream/public/dashboard.js` - Tab logic, Alpha Pool rendering
-- `services/hl-stream/src/index.ts` - Proxy routes for `/alpha-pool`, `/consensus`
-- `db/migrations/019_consensus_signals.sql` - Consensus signals table
-
-**Phase 3b (Partial - Episode Integration)**:
-- `services/hl-decide/app/episode.py` - Python episode builder (EpisodeTracker, EpisodeFill, Episode)
-- `services/hl-decide/tests/test_episode.py` - 30 episode builder tests
-- `db/migrations/022_episode_fills.sql` - Multi-fill tracking per episode
-
-**Phase 3b (Completed - December 2025)**:
-- ✅ Episode builder ported to Python (`hl-decide/app/episode.py`)
-- ✅ Votes derived from episodes, not individual fills
-- ✅ R-multiples calculated on position close, NIG posteriors updated
-- ✅ Vote weights normalized by notional ($100k base, capped at 1.0)
-- ✅ `episode_fills` table for multi-fill tracking per episode
-- ✅ 30 Python tests for episode builder
-- ✅ **Thompson Sampling**: Replaced posterior-mean with actual sampling in hl-sage
-- ✅ **NIG Weight Derivation**: ScoreEvent.weight = κ/(κ+10) from NIG posterior
-- ✅ **ATR Dynamic Stops**: ATRProvider with asset-specific multipliers (BTC: 2x, ETH: 1.5x)
-- ✅ **Correlation Job**: Daily computation with phi correlation on 5-min buckets
-- ✅ **CorrelationProvider**: Hydrates ConsensusDetector on startup
-- ✅ **Integration Tests**: 22 tests covering Thompson→Consensus→Episode flow
-- ✅ **Operational Runbook**: `docs/RUNBOOK.md` for system operations
-
-**Files Added/Modified in Phase 3b**:
-- `services/hl-sage/app/main.py` - Thompson Sampling integration
-- `services/hl-sage/tests/test_thompson_sampling.py` - 25 tests
-- `services/hl-decide/app/atr.py` - ATR provider (new)
-- `services/hl-decide/app/correlation.py` - Correlation provider (new)
-- `services/hl-decide/app/consensus.py` - Dynamic stop fraction support
-- `services/hl-decide/tests/test_atr.py` - 22 ATR tests
-- `services/hl-decide/tests/test_correlation.py` - 23 correlation tests
-- `services/hl-decide/tests/test_integration.py` - 22 integration tests
-- `db/migrations/016_trader_correlation.sql` - trader_corr table
-- `docs/RUNBOOK.md` - Operational runbook
-
-**Summary of Implementation Gaps** (All Core Gaps Resolved):
-1. ~~Selection = posterior mean, not Thompson Sampling~~ ✅ RESOLVED
-2. ~~Consensus = hardcoded 1% stop, no ATR~~ ✅ RESOLVED
-3. ~~Correlation matrix = empty, effK defaults to ρ=0.3~~ ✅ RESOLVED
-4. ~~Episodes = not integrated~~ ✅ RESOLVED
-5. ~~Vote weights = clamped delta~~ ✅ RESOLVED
-6. ~~ScoreEvent.weight = legacy leaderboard, not NIG-derived~~ ✅ RESOLVED
-7. E2E tests = fragile selectors, no backend assertions (deferred to Phase 4)
-8. CI = unit tests only, E2E manual (deferred to Phase 4)
-
-#### Phase 3b Quant Review Enhancements (December 2025)
-
-Based on peer quant review, the following robustness improvements were implemented:
-
-**ATR Enhancements**:
-- [x] **ATR-based price bands**: Consensus price drift gate now uses R-units (`CONSENSUS_MAX_PRICE_DRIFT_R=0.25`) instead of fixed BPS (`CONSENSUS_MAX_PRICE_BAND_BPS=8`). Deviation = BPS / (stop_fraction × 10000).
-- [x] **ATR staleness checks**: `ATRData.is_stale` property flags data older than `ATR_MAX_STALENESS_SECONDS` (default 300s). Fallback data is always considered stale.
-- [x] **Asset-specific fallbacks**: Replaced hardcoded 0.5% fallback with `ATR_FALLBACK_BY_ASSET` (BTC: 0.4%, ETH: 0.6%) based on typical 1-min ATR profiles.
-- [x] **Fallback logging**: Warning logged when ATR uses fallback values for production visibility.
-- [x] **`get_atr_with_staleness_check()`**: New method returns tuple of (ATRData, is_stale) with optional logging.
-- [x] **ATR strict mode**: `ATR_STRICT_MODE=true` (default) blocks gating when ATR uses hardcoded fallback. Set to `false` for non-prod to warn-and-pass.
-- [x] **24h realized vol fallback**: `_compute_realized_vol()` calculates rolling 24h volatility from `marks_1m` as data-driven fallback before using hardcoded values.
-- [x] **ATR validity gate**: ConsensusDetector tracks `atr_validity` per symbol; price gate fails if ATR data quality is insufficient in strict mode.
-
-**Correlation Enhancements**:
-- [x] **Correlation staleness**: `CorrelationProvider.is_stale` flags data older than `CORR_MAX_STALENESS_DAYS` (default 7 days).
-- [x] **Time-decay**: `_decay_factor()` uses exponential decay with `CORR_DECAY_HALFLIFE_DAYS` (default 3 days). Formula: `factor = 2^(-age/halflife)`.
-- [x] **Decayed lookup**: `get_with_decay()` blends stored correlation toward `DEFAULT_CORRELATION` (0.3) based on data age.
-- [x] **Freshness check**: `check_freshness()` returns (is_fresh, message) for operational monitoring.
-- [x] **Default usage tracking**: Provider tracks how many times default correlation was used (`_default_used_count`).
-- [x] **Hydrate with decay**: `hydrate_detector(apply_decay=True)` applies decay when loading correlations into ConsensusDetector.
-- [x] **Periodic correlation refresh**: Background task (`periodic_correlation_refresh_task`) recomputes correlations daily (configurable via `CORR_REFRESH_INTERVAL_HOURS`, default 24h).
-
-**Vote Weighting Improvements**:
-- [x] **Logarithmic scaling**: Default mode (`VOTE_WEIGHT_MODE=log`) uses `log(1 + notional/base)` to smooth large vs small positions.
-- [x] **Equity-normalized mode**: When `VOTE_WEIGHT_MODE=equity` and equity data available, uses `sqrt(notional/equity)` for risk-adjusted weighting.
-- [x] **Configurable base**: `VOTE_WEIGHT_LOG_BASE=10000` ($10k base for log scaling).
-- [x] **Max weight cap**: `VOTE_WEIGHT_MAX=1.0` prevents any single trader from dominating.
-- [x] **Notional tracking**: Vote dataclass now tracks `notional` and `equity` for transparency.
-- [x] **Backwards compatibility**: `VOTE_WEIGHT_MODE=linear` preserves legacy behavior for testing.
-
-**New Tests** (39 tests added):
-- `TestATRStaleness`: 5 tests for staleness detection (including realized_vol)
-- `TestAssetSpecificFallbacks`: 3 tests for per-asset fallback values
-- `TestStrictModeGating`: 4 tests for ATR strict mode behavior
-- `TestRealizedVolatility`: 3 tests for 24h realized vol calculation
-- `TestConsensusATRValidityGate`: 3 tests for consensus ATR validity
-- `TestCorrelationStaleness`: 3 tests for correlation data staleness
-- `TestCorrelationDecay`: 4 tests for exponential decay calculation
-- `TestGetWithDecay`: 4 tests for decayed correlation lookup
-- `TestCheckFreshness`: 3 tests for freshness status
-- `TestDecayQuantAcceptance`: 3 quant acceptance tests for decay behavior
-- `TestVoteWeighting`: 8 tests for log/equity/linear vote weighting modes
-
-**Configuration**:
 ```bash
-# ATR staleness and strict mode
-ATR_MAX_STALENESS_SECONDS=300   # 5 minutes
-ATR_STRICT_MODE=true            # Block gating on hardcoded fallback (default true)
-ATR_REALIZED_VOL_WINDOW_HOURS=24  # Rolling window for realized vol fallback
-ATR_REALIZED_VOL_MIN_SAMPLES=60   # Min candles for realized vol calculation
+# Start services
+docker compose up -d
 
-# Correlation staleness and decay
-CORR_MAX_STALENESS_DAYS=7       # Max age before full fallback
-CORR_DECAY_HALFLIFE_DAYS=3.0    # Half-life for exponential decay
-DEFAULT_CORRELATION=0.3          # Used when data missing or very stale
-CORR_REFRESH_INTERVAL_HOURS=24  # Daily refresh (background task)
+# View dashboard
+open http://localhost:4102/dashboard
 
-# Vote weighting
-VOTE_WEIGHT_MODE=log            # "log" (default), "equity", or "linear"
-VOTE_WEIGHT_LOG_BASE=10000.0    # $10k base for log scaling
-VOTE_WEIGHT_MAX=1.0             # Max weight per trader
+# Run tests
+make test            # All tests
+make test-ts         # TypeScript only
+make test-py         # Python only
+
+# View logs
+docker compose logs -f hl-decide
 ```
 
 ---
 
-## Next Steps: Phase 4 - Risk Management & Position Sizing
+## Algorithm Summary
 
-With Phase 3b complete, the core algorithm is fully implemented. Phase 4 focuses on:
+### The Problem
+1. **Selection**: Which traders to follow? Leaderboards lag reality.
+2. **Correlation**: "5 traders agree" may be 1 signal repeated 5 times.
+3. **Measurement**: Win rate misleads; a 30% winner with +5R/-0.5R beats 80% winner with +0.2R/-0.5R.
 
-1. **Kelly Calculator** - Position sizing based on win rate and R-multiple distribution
-2. **Risk Limits** - Max position size, exposure limits, drawdown controls
-3. **Paper Trading Mode** - Simulation mode to validate signals before live trading
-4. **Hyperliquid Integration** - Read-only API to track simulated fills
-5. **E2E Test Hardening** - Stabilize Playwright tests with proper data-testid selectors
+### Our Solution
 
-See "Phase 4: Risk Management & Position Sizing" section above for detailed tasks.
+**Layer 1: Position Lifecycle**
+- Track complete position lifecycles (open → close)
+- Calculate R-multiples from realized P&L
+- 1 position = 1 data point (not 1000s of fills)
+
+**Layer 2: NIG Bayesian Model**
+```
+μ | σ² ~ N(m, σ²/κ)      # Mean R given variance
+σ² ~ InverseGamma(α, β)  # Variance of R
+```
+- Proper uncertainty quantification
+- New traders have wide posteriors (exploration)
+- Proven traders have narrow posteriors (exploitation)
+
+**Layer 3: Thompson Sampling**
+- Sample μ from each trader's posterior
+- Rank by sampled value, select top K
+- Natural explore/exploit balance
+
+**Layer 4: 5-Gate Consensus**
+1. **Dispersion**: ≥70% agreement, ≥3 traders
+2. **Effective-K**: Correlation-adjusted ≥2.0
+3. **Freshness**: Oldest vote within window
+4. **Price Drift**: <0.25R from median
+5. **EV Gate**: Net EV ≥0.2R after costs
+
+**Layer 5: Risk Fail-Safes**
+- Min confidence (55%)
+- Min EV (0.2R)
+- Position/exposure limits
+- Cooldowns
 
 ---
 
