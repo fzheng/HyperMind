@@ -148,6 +148,16 @@ corr_pairs_loaded_gauge = Gauge(
     "Number of correlation pairs currently loaded",
     registry=registry,
 )
+corr_coverage_gauge = Gauge(
+    "decide_correlation_coverage_pct",
+    "Percentage of pool trader pairs with actual correlation data (0-100)",
+    registry=registry,
+)
+corr_pool_size_gauge = Gauge(
+    "decide_correlation_pool_size",
+    "Number of traders in the correlation pool",
+    registry=registry,
+)
 
 # Effective-K metrics - track when default ρ is used
 effk_default_fallback_counter = Counter(
@@ -177,6 +187,17 @@ weight_max_gauge = Gauge(
 weight_gini_gauge = Gauge(
     "decide_vote_weight_gini",
     "Gini coefficient of vote weights (0=equal, 1=concentrated)",
+    registry=registry,
+)
+weight_saturation_counter = Counter(
+    "decide_vote_weight_saturated_total",
+    "Votes where weight hit the cap (saturation)",
+    labelnames=["asset"],
+    registry=registry,
+)
+weight_saturation_pct_gauge = Gauge(
+    "decide_vote_weight_saturation_pct",
+    "Percentage of weights at or near cap in recent consensus check",
     registry=registry,
 )
 
@@ -225,15 +246,19 @@ def calculate_gini(weights: list[float]) -> float:
     return max(0.0, min(1.0, gini))
 
 
-def update_weight_metrics(weights: list[float]) -> None:
+def update_weight_metrics(weights: list[float], asset: str = "unknown") -> None:
     """
     Update weight distribution metrics from a consensus check.
 
     Args:
         weights: List of vote weights from consensus check
+        asset: Asset symbol for saturation tracking (BTC/ETH)
     """
     if not weights:
         return
+
+    # Import weight cap from consensus module
+    from .consensus import VOTE_WEIGHT_MAX
 
     # Record each weight in histogram
     for w in weights:
@@ -246,13 +271,25 @@ def update_weight_metrics(weights: list[float]) -> None:
     gini = calculate_gini(weights)
     weight_gini_gauge.set(gini)
 
+    # Track saturation (weights at or near cap)
+    # Consider "near cap" as >= 95% of max weight
+    saturation_threshold = VOTE_WEIGHT_MAX * 0.95
+    saturated_count = sum(1 for w in weights if w >= saturation_threshold)
 
-def update_correlation_metrics(provider) -> None:
+    if saturated_count > 0:
+        weight_saturation_counter.labels(asset=asset).inc(saturated_count)
+
+    saturation_pct = (saturated_count / len(weights)) * 100 if weights else 0
+    weight_saturation_pct_gauge.set(saturation_pct)
+
+
+def update_correlation_metrics(provider, pool_addresses: list[str] | None = None) -> None:
     """
     Update correlation observability metrics from the provider.
 
     Args:
         provider: CorrelationProvider instance
+        pool_addresses: Optional list of addresses in the current pool (for coverage calc)
     """
     # Update staleness gauge
     corr_stale_gauge.set(1.0 if provider.is_stale else 0.0)
@@ -267,6 +304,29 @@ def update_correlation_metrics(provider) -> None:
 
     # Update pairs loaded
     corr_pairs_loaded_gauge.set(len(provider.correlations))
+
+    # Calculate coverage if pool addresses provided
+    if pool_addresses:
+        corr_pool_size_gauge.set(len(pool_addresses))
+
+        # Count how many pairs have actual correlation data
+        n = len(pool_addresses)
+        total_pairs = n * (n - 1) // 2  # n choose 2
+
+        if total_pairs > 0:
+            pairs_with_data = 0
+            addrs_lower = [a.lower() for a in pool_addresses]
+            for i, a in enumerate(addrs_lower):
+                for j in range(i + 1, len(addrs_lower)):
+                    b = addrs_lower[j]
+                    key = tuple(sorted([a, b]))
+                    if key in provider.correlations:
+                        pairs_with_data += 1
+
+            coverage_pct = (pairs_with_data / total_pairs) * 100
+            corr_coverage_gauge.set(coverage_pct)
+        else:
+            corr_coverage_gauge.set(0.0)
 
 
 async def ensure_stream(js, name: str, subjects):
@@ -1329,11 +1389,14 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
 
     # Gate 2: Effective-K (correlation-adjusted)
     weights = {v.address: v.weight for v in agreeing_votes}
-    eff_k = consensus_detector.eff_k_from_corr(weights)
+    eff_k = consensus_detector.eff_k_from_corr(
+        weights,
+        fallback_counter_callback=lambda: effk_default_fallback_counter.inc(),
+    )
 
     # Record effK and weight metrics for observability
     effk_value_histogram.observe(eff_k)
-    update_weight_metrics(list(weights.values()))
+    update_weight_metrics(list(weights.values()), asset=asset)
 
     if eff_k < CONSENSUS_MIN_EFFECTIVE_K:
         return None

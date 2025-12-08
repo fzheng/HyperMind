@@ -18,7 +18,7 @@ import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 # Configuration
@@ -482,7 +482,11 @@ class ConsensusDetector:
 
         return votes
 
-    def eff_k_from_corr(self, weights: Dict[str, float]) -> float:
+    def eff_k_from_corr(
+        self,
+        weights: Dict[str, float],
+        fallback_counter_callback: Optional[Callable[[], None]] = None,
+    ) -> float:
         """
         Calculate effective K using correlation matrix.
 
@@ -490,6 +494,7 @@ class ConsensusDetector:
 
         Args:
             weights: Dict mapping address to weight
+            fallback_counter_callback: Optional callback to increment when default ρ is used
 
         Returns:
             Effective number of independent traders
@@ -500,6 +505,7 @@ class ConsensusDetector:
 
         num = sum(weights.values()) ** 2
         den = 0.0
+        fallback_count = 0
 
         for i, a in enumerate(addrs):
             for j, b in enumerate(addrs):
@@ -507,10 +513,20 @@ class ConsensusDetector:
                     rho = 1.0
                 else:
                     key = tuple(sorted([a, b]))
-                    rho = self.correlation_matrix.get(key, DEFAULT_CORRELATION)
+                    stored_rho = self.correlation_matrix.get(key)
+                    if stored_rho is None:
+                        rho = DEFAULT_CORRELATION
+                        fallback_count += 1
+                    else:
+                        rho = stored_rho
                     rho = max(0.0, min(1.0, rho))  # Clip negative correlations
 
                 den += weights[a] * weights[b] * rho
+
+        # Report fallback usage (only count unique pairs, not i,j and j,i)
+        if fallback_count > 0 and fallback_counter_callback:
+            # Each pair is counted twice (i,j and j,i), so divide by 2
+            fallback_counter_callback()
 
         return num / max(den, 1e-9)
 

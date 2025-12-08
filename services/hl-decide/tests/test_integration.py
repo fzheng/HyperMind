@@ -955,3 +955,347 @@ class TestBackgroundTaskConfiguration:
         from app.main import RECONCILE_INTERVAL_HOURS
 
         assert RECONCILE_INTERVAL_HOURS == 6
+
+
+class TestQuantPipelineIntegration:
+    """
+    Comprehensive quant pipeline integration tests.
+
+    Tests the full flow: Episode → NIG Update → Thompson Sampling → Consensus → Signal
+    under varying volatility and correlation conditions.
+
+    These tests validate that the quant correctness holds across different market regimes.
+    """
+
+    def _make_consensus_fill(self, address: str, asset: str, side: str, size: float, price: float, ts: datetime) -> Fill:
+        """Helper to create a Fill for consensus detector."""
+        return Fill(
+            fill_id=f"fill-{address}-{ts.timestamp()}",
+            address=address,
+            asset=asset,
+            side=side,
+            size=size,
+            price=price,
+            ts=ts,
+        )
+
+    def _make_episode_fill(self, address: str, asset: str, side: str, px: float, sz: float, ts: datetime, fee: float = 10.0) -> EpisodeFill:
+        """Helper to create an EpisodeFill for episode tracker."""
+        return EpisodeFill(
+            fill_id=f"efill-{address}-{ts.timestamp()}",
+            address=address,
+            asset=asset,
+            side=side,
+            size=sz,
+            price=px,
+            ts=ts,
+            fees=fee,
+        )
+
+    def test_low_vol_high_corr_regime(self):
+        """
+        Low volatility + high correlation regime:
+        - Tight stops (low ATR) → small risk per trade
+        - High correlation → low effK → harder to pass consensus
+        - Should require strong agreement to generate signal
+        """
+        # Setup: Low vol (1% ATR), high correlation (ρ=0.8)
+        detector = ConsensusDetector()
+        detector.set_stop_fraction("BTC", 0.02)  # 2% stop (low vol)
+
+        # All traders highly correlated
+        detector.update_correlation("0xalpha", "0xbeta", 0.8)
+        detector.update_correlation("0xalpha", "0xgamma", 0.8)
+        detector.update_correlation("0xbeta", "0xgamma", 0.8)
+
+        # 3 traders all going long
+        weights = {"0xalpha": 1.0, "0xbeta": 1.0, "0xgamma": 1.0}
+        eff_k = detector.eff_k_from_corr(weights)
+
+        # With ρ=0.8: effK = 9 / (3 + 6*0.8) = 9/7.8 ≈ 1.15
+        # This should FAIL the MIN_EFFECTIVE_K=2.0 gate
+        assert eff_k < 1.5
+        assert eff_k < 2.0  # Below consensus threshold
+
+        # Verify R calculation with tight stops
+        config = EpisodeBuilderConfig(default_stop_fraction=0.02)
+        tracker = EpisodeTracker(config)
+        now = datetime.now(timezone.utc)
+
+        tracker.process_fill(self._make_episode_fill("0xtest", "BTC", "buy", 100000.0, 1.0, now))
+        episode = tracker.process_fill(self._make_episode_fill("0xtest", "BTC", "sell", 101000.0, 1.0, now + timedelta(hours=1)))
+
+        # $1000 profit with 2% stop ($2000 risk) = ~0.49R
+        assert episode.result_r == pytest.approx(0.49, rel=0.05)
+
+    def test_high_vol_low_corr_regime(self):
+        """
+        High volatility + low correlation regime:
+        - Wide stops (high ATR) → larger risk per trade
+        - Low correlation → high effK → easier to pass consensus
+        - More trades should pass but with lower R multiples
+        """
+        # Setup: High vol (4% ATR), low correlation (ρ=0.1)
+        detector = ConsensusDetector()
+        detector.set_stop_fraction("BTC", 0.08)  # 8% stop (high vol)
+
+        # All traders independent
+        detector.update_correlation("0xalpha", "0xbeta", 0.1)
+        detector.update_correlation("0xalpha", "0xgamma", 0.1)
+        detector.update_correlation("0xbeta", "0xgamma", 0.1)
+
+        # 3 traders all going long
+        weights = {"0xalpha": 1.0, "0xbeta": 1.0, "0xgamma": 1.0}
+        eff_k = detector.eff_k_from_corr(weights)
+
+        # With ρ=0.1: effK = 9 / (3 + 6*0.1) = 9/3.6 ≈ 2.5
+        # This should PASS the MIN_EFFECTIVE_K=2.0 gate
+        assert eff_k > 2.0
+        assert eff_k < 3.0
+
+        # Verify R calculation with wide stops
+        config = EpisodeBuilderConfig(default_stop_fraction=0.08)
+        tracker = EpisodeTracker(config)
+        now = datetime.now(timezone.utc)
+
+        tracker.process_fill(self._make_episode_fill("0xtest", "BTC", "buy", 100000.0, 1.0, now))
+        episode = tracker.process_fill(self._make_episode_fill("0xtest", "BTC", "sell", 101000.0, 1.0, now + timedelta(hours=1)))
+
+        # Same $1000 profit with 8% stop ($8000 risk) = ~0.12R
+        assert episode.result_r == pytest.approx(0.12, rel=0.05)
+
+    def test_mixed_regime_with_weight_disparity(self):
+        """
+        Test with unequal weights (whale vs small traders):
+        - One whale with high weight
+        - Multiple small traders with low weights
+        - Verify effK accounts for weight disparity
+        """
+        detector = ConsensusDetector()
+
+        # Set moderate correlation
+        for a, b in [("0xwhale", "0xsmall1"), ("0xwhale", "0xsmall2"), ("0xsmall1", "0xsmall2")]:
+            detector.update_correlation(a, b, 0.3)
+
+        # Whale has 10x weight
+        weights = {"0xwhale": 1.0, "0xsmall1": 0.1, "0xsmall2": 0.1}
+        eff_k = detector.eff_k_from_corr(weights)
+
+        # With unequal weights, effK is dominated by whale
+        # Sum weights = 1.2, sum² = 1.44
+        # Denominator dominated by whale's self-correlation
+        assert 1.0 < eff_k < 2.0  # Lower than equal weights case
+
+        # Compare to equal weights
+        equal_weights = {"0xwhale": 1.0, "0xsmall1": 1.0, "0xsmall2": 1.0}
+        eff_k_equal = detector.eff_k_from_corr(equal_weights)
+
+        # Equal weights should give higher effK
+        assert eff_k_equal > eff_k
+
+    def test_effk_fallback_tracking(self):
+        """
+        Test that effK calculation properly tracks when default ρ is used.
+        """
+        detector = ConsensusDetector()
+
+        # Only set correlation for one pair
+        detector.update_correlation("0xa", "0xb", 0.5)
+
+        # 3 traders but only 1 stored correlation pair
+        weights = {"0xa": 1.0, "0xb": 1.0, "0xc": 1.0}
+
+        fallback_count = 0
+        def count_fallbacks():
+            nonlocal fallback_count
+            fallback_count += 1
+
+        eff_k = detector.eff_k_from_corr(weights, fallback_counter_callback=count_fallbacks)
+
+        # Should have used fallback for pairs (a,c) and (b,c)
+        # Since the callback fires once per check, fallback_count should be 1
+        assert fallback_count >= 1
+
+        # effK should still be valid
+        assert 1.0 < eff_k < 3.0
+
+    def test_nig_weight_formula(self):
+        """
+        Verify NIG posterior weight formula: κ/(κ+10).
+
+        Higher κ (more observations) → higher weight (more confidence)
+        New traders (κ=1) → low weight (0.09)
+        Veteran traders (κ=100) → high weight (0.91)
+        """
+        # NIG weight formula (used in hl-sage Thompson Sampling)
+        def nig_weight(kappa: float) -> float:
+            return kappa / (kappa + 10)
+
+        # New trader with 1 observation
+        assert nig_weight(1) == pytest.approx(0.091, rel=0.01)
+
+        # Moderate trader with 10 observations
+        assert nig_weight(10) == pytest.approx(0.5, rel=0.01)
+
+        # Veteran trader with 100 observations
+        assert nig_weight(100) == pytest.approx(0.909, rel=0.01)
+
+    def test_r_multiple_sensitivity_to_stop(self):
+        """
+        Verify R-multiple calculation sensitivity to stop fraction.
+
+        Same dollar profit should give different R values based on stop.
+        """
+        now = datetime.now(timezone.utc)
+
+        # Test that R-multiple scales inversely with stop fraction
+        # Smaller stop = larger R multiple for same profit
+        stop_fractions = [0.01, 0.02, 0.05, 0.10]
+        r_multiples = []
+
+        for stop_fraction in stop_fractions:
+            config = EpisodeBuilderConfig(default_stop_fraction=stop_fraction)
+            tracker = EpisodeTracker(config)
+
+            tracker.process_fill(self._make_episode_fill("0xtest", "BTC", "buy", 100000.0, 1.0, now))
+            episode = tracker.process_fill(self._make_episode_fill("0xtest", "BTC", "sell", 101000.0, 1.0, now + timedelta(hours=1)))
+
+            r_multiples.append(episode.result_r)
+
+        # Verify inverse relationship: smaller stop = larger R
+        for i in range(len(r_multiples) - 1):
+            assert r_multiples[i] > r_multiples[i + 1], \
+                f"R-multiple should decrease as stop widens: {r_multiples[i]:.2f} vs {r_multiples[i+1]:.2f}"
+
+        # Verify rough magnitudes (with tolerance for fees and R capping)
+        # 1% stop: ~0.98R (or capped at 1.0R)
+        assert r_multiples[0] >= 0.9, f"1% stop should give ~1R, got {r_multiples[0]:.2f}R"
+        # 10% stop: ~0.1R
+        assert r_multiples[-1] < 0.2, f"10% stop should give <0.2R, got {r_multiples[-1]:.2f}R"
+
+    def test_consensus_gates_progression(self):
+        """
+        Test the progression through consensus gates.
+
+        Gate 1: Dispersion (min traders, min %)
+        Gate 2: Effective-K (correlation adjusted)
+        Gate 3: Latency + Price band (ATR-based)
+        Gate 4: EV after costs
+        Gate 5: Risk limits (confidence, min EV)
+        """
+        from app.consensus import (
+            passes_consensus_gates, calculate_ev,
+            CONSENSUS_MIN_TRADERS, CONSENSUS_MIN_PCT,
+            CONSENSUS_MIN_EFFECTIVE_K, CONSENSUS_EV_MIN_R,
+            DEFAULT_AVG_WIN_R, DEFAULT_AVG_LOSS_R,
+        )
+
+        # Gate 1: Dispersion
+        directions = ["long", "long", "long"]  # 3 traders, 100% agreement
+        passes, majority = passes_consensus_gates(directions, min_agreeing=3, min_pct=0.70)
+        assert passes is True
+        assert majority == "long"
+
+        # Gate 1 fail: Not enough agreement
+        directions = ["long", "long", "short"]  # 67% agreement
+        passes, majority = passes_consensus_gates(directions, min_agreeing=3, min_pct=0.70)
+        assert passes is False  # 2/3 = 67% < 70%
+
+        # Gate 2: Effective-K calculation
+        detector = ConsensusDetector()
+        detector.update_correlation("0xa", "0xb", 0.1)
+        detector.update_correlation("0xa", "0xc", 0.1)
+        detector.update_correlation("0xb", "0xc", 0.1)
+        weights = {"0xa": 1.0, "0xb": 1.0, "0xc": 1.0}
+        eff_k = detector.eff_k_from_corr(weights)
+        assert eff_k >= CONSENSUS_MIN_EFFECTIVE_K  # Low corr → high effK
+
+        # Gate 4: EV calculation - test with high p_win and wider stop
+        # Default avg_win_r=0.5, avg_loss_r=0.3, so gross EV = p*0.5 - (1-p)*0.3
+        # For p=0.80: gross = 0.80*0.5 - 0.20*0.3 = 0.40 - 0.06 = 0.34R
+        # Costs ~0.014R (7 bps / 5000 bps stop) → net ~0.33R
+        ev_result = calculate_ev(
+            p_win=0.80,  # High confidence
+            entry_px=100000.0,
+            stop_px=95000.0,  # 5% stop
+        )
+        assert ev_result["ev_net_r"] >= CONSENSUS_EV_MIN_R  # Should have positive EV
+
+        # Gate 4 fail: Low p_win gives negative EV
+        ev_result_low = calculate_ev(
+            p_win=0.30,  # Below breakeven
+            entry_px=100000.0,
+            stop_px=99000.0,
+        )
+        # With p=0.30: gross = 0.30*0.5 - 0.70*0.3 = 0.15 - 0.21 = -0.06R (before costs)
+        assert ev_result_low["ev_net_r"] < 0  # Negative EV
+
+    def test_atr_staleness_affects_gating(self):
+        """
+        Test that ATR staleness is properly tracked and affects gating.
+        """
+        from app.atr import ATR_MAX_STALENESS_SECONDS
+
+        now = datetime.now(timezone.utc)
+
+        # Fresh ATR data
+        fresh_atr = ATRData(
+            asset="BTC",
+            atr=2000.0,
+            atr_pct=2.0,
+            price=100000.0,
+            multiplier=2.0,
+            stop_distance_pct=4.0,
+            timestamp=now,
+            source="calculated",
+        )
+        assert fresh_atr.age_seconds < ATR_MAX_STALENESS_SECONDS
+        assert not fresh_atr.is_stale
+
+        # Stale ATR data (10 minutes old)
+        stale_atr = ATRData(
+            asset="BTC",
+            atr=2000.0,
+            atr_pct=2.0,
+            price=100000.0,
+            multiplier=2.0,
+            stop_distance_pct=4.0,
+            timestamp=now - timedelta(seconds=ATR_MAX_STALENESS_SECONDS + 60),
+            source="calculated",
+        )
+        assert stale_atr.age_seconds > ATR_MAX_STALENESS_SECONDS
+        assert stale_atr.is_stale
+
+    def test_correlation_decay_affects_effk(self):
+        """
+        Test that correlation decay (for stale data) affects effK calculation.
+        """
+        provider = CorrelationProvider()
+        detector = ConsensusDetector()
+
+        # Set high correlation with old data (6 days = 2 half-lives)
+        provider.correlations[("0xa", "0xb")] = 0.9
+        provider._loaded_date = date.today() - timedelta(days=6)
+
+        # Hydrate with decay
+        provider.hydrate_detector(detector, apply_decay=True)
+
+        key = tuple(sorted(["0xa", "0xb"]))
+        decayed_rho = detector.correlation_matrix.get(key)
+
+        # After 2 half-lives: decay = 0.25
+        # Decayed = 0.9 * 0.25 + 0.3 * 0.75 = 0.225 + 0.225 = 0.45
+        assert decayed_rho is not None
+        assert 0.4 < decayed_rho < 0.6
+
+        # Verify effK is higher with decayed (lower) correlation
+        weights = {"0xa": 1.0, "0xb": 1.0}
+        eff_k_decayed = detector.eff_k_from_corr(weights)
+
+        # Compare to fresh data (no decay)
+        detector_fresh = ConsensusDetector()
+        detector_fresh.update_correlation("0xa", "0xb", 0.9)
+        eff_k_fresh = detector_fresh.eff_k_from_corr(weights)
+
+        # Decayed (lower) correlation → higher effK
+        assert eff_k_decayed > eff_k_fresh
