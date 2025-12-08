@@ -751,9 +751,12 @@ async function main() {
   });
 
   // Fetch historical fills from Hyperliquid API for Legacy watchlist
+  // This fetches ALL available fills from the API and inserts any missing ones
+  // to fill gaps between what's in the DB and the current time.
   app.post('/dashboard/api/legacy/fills/fetch-history', async (req, res) => {
     try {
-      const limit = req.body?.limit ? Math.min(100, Math.max(1, parseInt(String(req.body.limit), 10))) : 50;
+      // limit parameter now controls how many fills to return in response, not how many to fetch
+      const responseLimit = req.body?.limit ? Math.min(100, Math.max(1, parseInt(String(req.body.limit), 10))) : 50;
       const addresses = watchlist.length > 0 ? watchlist : [];
 
       if (addresses.length === 0) {
@@ -761,15 +764,19 @@ async function main() {
       }
 
       let totalInserted = 0;
-      const results: Array<{ address: string; inserted: number }> = [];
+      const results: Array<{ address: string; inserted: number; fetched: number }> = [];
 
-      // Fetch fills for each address (limit concurrency)
+      // Fetch ALL fills for each address (not just limit)
+      // The API returns up to 2000 fills per address, newest first
+      // insertTradeIfNew handles deduplication by hash
       for (const address of addresses) {
         try {
           const fills = await fetchUserFills(address, { aggregateByTime: true, symbols: ['BTC', 'ETH'] });
           let inserted = 0;
+          const fetched = fills?.length || 0;
 
-          for (const f of (fills || []).slice(0, limit)) {
+          // Process ALL fills from API - dedup happens in insertTradeIfNew
+          for (const f of fills || []) {
             const delta = f.side === 'B' ? +f.sz : -f.sz;
             const newPos = f.startPosition + delta;
             let action = '';
@@ -795,18 +802,18 @@ async function main() {
             if (result.inserted) inserted += 1;
           }
 
-          results.push({ address, inserted });
+          results.push({ address, inserted, fetched });
           totalInserted += inserted;
         } catch (err: any) {
           logger.warn('legacy_fetch_history_address_failed', { address, err: err?.message });
-          results.push({ address, inserted: 0 });
+          results.push({ address, inserted: 0, fetched: 0 });
         }
       }
 
       logger.info('legacy_fetch_history_complete', { totalInserted, addressCount: addresses.length });
 
-      // Return the fills from DB after backfill
-      const dbFills = await getBackfillFills({ limit: 40, addresses });
+      // Return the fills from DB after backfill (limited for response size)
+      const dbFills = await getBackfillFills({ limit: responseLimit, addresses });
 
       res.json({
         inserted: totalInserted,
