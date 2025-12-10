@@ -528,7 +528,11 @@ main {
 .address-cell-with-pin {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+}
+
+.address-cell-with-pin .sub-indicator {
+  flex-shrink: 0;
 }
 
 .address-cell-with-pin .address-link {
@@ -2416,6 +2420,151 @@ td {
   height: 8px;
   border-radius: 50%;
   background: var(--positive);
+}
+
+/* Subscription method indicator */
+.alpha-pool-table .address-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sub-indicator {
+  font-size: 0.75rem;
+  cursor: help;
+  opacity: 0.8;
+}
+
+.sub-indicator.sub-websocket {
+  color: var(--positive-text);
+}
+
+.sub-indicator.sub-polling {
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+/* Clickable subscription indicators for promote/demote */
+.sub-indicator.clickable {
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+.sub-indicator.clickable:hover {
+  transform: scale(1.2);
+  opacity: 1;
+}
+
+/* WebSocket slots indicator in header */
+.ws-slots-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.ws-slots-icon {
+  font-size: 0.9rem;
+}
+
+.ws-slots-value {
+  font-weight: 500;
+}
+
+.ws-slots-indicator.slots-available .ws-slots-value {
+  color: var(--positive-text);
+}
+
+.ws-slots-indicator.slots-full .ws-slots-value {
+  color: var(--warning-text, #f59e0b);
+}
+
+/* Promote/Demote popover */
+.sub-popover {
+  position: absolute;
+  z-index: 1000;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px var(--shadow-lg);
+  padding: 12px;
+  min-width: 220px;
+  font-size: 0.85rem;
+}
+
+.sub-popover-header {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.sub-popover-method {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.sub-popover-sources {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin-bottom: 12px;
+}
+
+.sub-popover-action {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  transition: background 0.15s ease;
+}
+
+.sub-popover-action.promote {
+  background: var(--positive-bg);
+  color: var(--positive-text);
+}
+
+.sub-popover-action.promote:hover {
+  background: var(--positive-border);
+}
+
+.sub-popover-action.demote {
+  background: var(--negative-bg);
+  color: var(--negative-text);
+}
+
+.sub-popover-action.demote:hover {
+  background: var(--negative-border);
+}
+
+.sub-popover-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sub-popover-warning {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-primary);
+}
+
+.sub-popover-demoted {
+  font-size: 0.75rem;
+  color: var(--warning-text, #f59e0b);
+  margin-top: 4px;
 }
 
 .alpha-pool-table .mu-positive {

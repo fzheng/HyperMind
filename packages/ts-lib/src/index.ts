@@ -18,3 +18,4 @@ export * from './scoring';
 export * from './migrate';
 export * from './episode';
 export * from './consensus';
+export * from './subscription-manager';

@@ -63,6 +63,7 @@ from .bandit import (
 SERVICE_NAME = "hl-sage"
 OWNER_TOKEN = os.getenv("OWNER_TOKEN", "dev-owner")
 NATS_URL = os.getenv("NATS_URL", "nats://0.0.0.0:4222")
+HL_STREAM_URL = os.getenv("HL_STREAM_URL", "http://hl-stream:8080")
 DB_URL = os.getenv("DATABASE_URL", "postgresql://hlbot:hlbotpassword@0.0.0.0:5432/hlbot")
 MAX_TRACKED_ADDRESSES = int(os.getenv("MAX_TRACKED_ADDRESSES", "1000"))
 MAX_SCORES = int(os.getenv("MAX_SCORES", "500"))
@@ -379,6 +380,9 @@ async def startup_event():
         # Start periodic fill sync for Alpha Pool addresses
         asyncio.create_task(periodic_alpha_pool_fill_sync())
 
+        # Start subscription sync to register Alpha Pool addresses with hl-stream
+        asyncio.create_task(sync_alpha_pool_subscriptions())
+
         # Start periodic Alpha Pool refresh (every ALPHA_POOL_REFRESH_HOURS)
         asyncio.create_task(periodic_alpha_pool_refresh())
     except Exception as e:
@@ -427,12 +431,37 @@ async def auto_refresh_alpha_pool_if_empty():
 ALPHA_POOL_FILL_SYNC_INTERVAL = int(os.getenv("ALPHA_POOL_FILL_SYNC_INTERVAL", "300"))  # 5 minutes default
 
 
+async def get_polling_addresses() -> list[str]:
+    """
+    Get addresses that need polling (not on WebSocket).
+
+    Fetches subscription methods from hl-stream and returns only addresses
+    that are using 'polling' or 'none' method (not real-time WebSocket).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{HL_STREAM_URL}/subscriptions/methods")
+            if response.status_code == 200:
+                methods = response.json()
+                # Return addresses that are NOT on WebSocket
+                polling_addrs = [
+                    addr for addr, info in methods.items()
+                    if info.get("method") != "websocket"
+                ]
+                return polling_addrs
+    except Exception as e:
+        print(f"[hl-sage] Could not fetch subscription methods: {e}")
+
+    # If we can't get subscription info, return empty list to avoid redundant polling
+    return []
+
+
 async def periodic_alpha_pool_fill_sync():
     """
-    Periodically sync fills for Alpha Pool addresses.
+    Periodically sync fills for Alpha Pool addresses that are NOT on WebSocket.
 
-    This ensures new fills from Alpha Pool traders are captured even though
-    the realtime WebSocket only tracks legacy leaderboard addresses.
+    Only polls fills for addresses using 'polling' method - addresses that
+    are subscribed via WebSocket receive real-time fills and don't need polling.
 
     Runs every ALPHA_POOL_FILL_SYNC_INTERVAL seconds (default: 5 minutes).
     """
@@ -457,11 +486,30 @@ async def periodic_alpha_pool_fill_sync():
                 await asyncio.sleep(ALPHA_POOL_FILL_SYNC_INTERVAL)
                 continue
 
-            addresses = [row["address"] for row in rows]
-            print(f"[hl-sage] Syncing fills for {len(addresses)} Alpha Pool addresses...")
+            all_addresses = set(row["address"].lower() for row in rows)
 
-            # Backfill recent fills for these addresses
-            results = await backfill_historical_fills_for_addresses(app.state.db, addresses)
+            # Only poll addresses that are NOT on WebSocket
+            polling_addrs = await get_polling_addresses()
+            polling_set = set(addr.lower() for addr in polling_addrs)
+
+            # Filter to Alpha Pool addresses that need polling
+            addresses_to_poll = [
+                row["address"] for row in rows
+                if row["address"].lower() in polling_set
+            ]
+
+            # If all addresses are on WebSocket, skip polling
+            if not addresses_to_poll:
+                websocket_count = len(all_addresses) - len(addresses_to_poll)
+                print(f"[hl-sage] All {websocket_count} Alpha Pool addresses on WebSocket, skipping poll")
+                await asyncio.sleep(ALPHA_POOL_FILL_SYNC_INTERVAL)
+                continue
+
+            websocket_count = len(all_addresses) - len(addresses_to_poll)
+            print(f"[hl-sage] Polling fills for {len(addresses_to_poll)} addresses ({websocket_count} on WebSocket)...")
+
+            # Backfill recent fills for polling-only addresses
+            results = await backfill_historical_fills_for_addresses(app.state.db, addresses_to_poll)
             total_inserted = sum(results.values())
 
             if total_inserted > 0:
@@ -473,6 +521,94 @@ async def periodic_alpha_pool_fill_sync():
             print(f"[hl-sage] Fill sync error: {e}")
 
         await asyncio.sleep(ALPHA_POOL_FILL_SYNC_INTERVAL)
+
+
+# Interval for syncing Alpha Pool addresses to hl-stream subscription manager (in seconds)
+ALPHA_POOL_SUBSCRIPTION_SYNC_INTERVAL = int(os.getenv("ALPHA_POOL_SUBSCRIPTION_SYNC_INTERVAL", "60"))  # 1 minute default
+
+
+async def sync_alpha_pool_subscriptions():
+    """
+    Sync selected Alpha Pool addresses to hl-stream for real-time WebSocket tracking.
+
+    This registers the top-K selected Alpha Pool addresses with hl-stream's
+    centralized subscription manager, enabling real-time fill detection
+    instead of relying on periodic backfill.
+
+    Runs every ALPHA_POOL_SUBSCRIPTION_SYNC_INTERVAL seconds (default: 60s).
+
+    The sync only includes addresses that are:
+    1. Active in alpha_pool_addresses
+    2. Selected by the NIG Thompson Sampling (top-K)
+    """
+    # Wait for startup to complete
+    await asyncio.sleep(15)
+    print(f"[hl-sage] Starting Alpha Pool subscription sync (interval: {ALPHA_POOL_SUBSCRIPTION_SYNC_INTERVAL}s)")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        while True:
+            try:
+                # Get selected Alpha Pool addresses (top-K by posterior mean)
+                async with app.state.db.acquire() as conn:
+                    # First check if we have any trader_performance data
+                    has_performance = await conn.fetchval(
+                        "SELECT COUNT(*) FROM trader_performance"
+                    )
+
+                    if has_performance > 0:
+                        # Get addresses with NIG posteriors, sorted by posterior mean
+                        rows = await conn.fetch(
+                            """
+                            SELECT a.address
+                            FROM alpha_pool_addresses a
+                            LEFT JOIN trader_performance tp ON LOWER(a.address) = LOWER(tp.address)
+                            WHERE a.is_active = true
+                            ORDER BY COALESCE(tp.nig_m, 0) DESC
+                            LIMIT $1
+                            """,
+                            BANDIT_SELECT_K,
+                        )
+                    else:
+                        # No performance data yet - use top-K by PnL
+                        rows = await conn.fetch(
+                            """
+                            SELECT address
+                            FROM alpha_pool_addresses
+                            WHERE is_active = true
+                            ORDER BY pnl_30d DESC NULLS LAST
+                            LIMIT $1
+                            """,
+                            BANDIT_SELECT_K,
+                        )
+
+                if not rows:
+                    await asyncio.sleep(ALPHA_POOL_SUBSCRIPTION_SYNC_INTERVAL)
+                    continue
+
+                addresses = [row["address"] for row in rows]
+
+                # Register with hl-stream subscription manager
+                response = await client.post(
+                    f"{HL_STREAM_URL}/subscriptions/replace",
+                    json={"source": "alpha-pool", "addresses": addresses},
+                    headers={"x-owner-key": OWNER_TOKEN},
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    total = result.get("totalAddresses", "?")
+                    count = result.get("count", len(addresses))
+                    print(f"[hl-sage] Synced {count} Alpha Pool addresses to WebSocket (total subscribed: {total})")
+                else:
+                    print(f"[hl-sage] Failed to sync subscriptions: HTTP {response.status_code}")
+
+            except httpx.ConnectError:
+                # hl-stream not available yet, will retry
+                pass
+            except Exception as e:
+                print(f"[hl-sage] Subscription sync error: {e}")
+
+            await asyncio.sleep(ALPHA_POOL_SUBSCRIPTION_SYNC_INTERVAL)
 
 
 async def periodic_alpha_pool_refresh():
@@ -1294,7 +1430,13 @@ async def get_alpha_pool(
         # Fetch PnL curves directly from Hyperliquid API (decoupled from legacy leaderboard)
         # and nicknames from leaderboard entries
         addresses = [p.address for p in posteriors]
-        pnl_curves = await get_pnl_curves_for_addresses(addresses)
+
+        # Optimization: Only fetch PnL curves for selected traders + top performers
+        # This avoids slow API calls for 50 addresses (would take 15+ seconds)
+        # Limit to top 20 by NIG posterior mean (most likely to be useful)
+        pnl_curve_addresses = [p.address for p in posteriors[:20]]
+        pnl_curves = await get_pnl_curves_for_addresses(pnl_curve_addresses)
+
         nicknames = await get_nicknames_for_addresses(app.state.db, addresses)
 
         # Get pool refresh timing info

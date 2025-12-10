@@ -993,10 +993,17 @@ function renderAddresses(stats = [], profiles = {}, holdings = {}) {
         : '';
       const addrLower = (row.address || '').toLowerCase();
       const rowClass = isPinned ? 'pinned-row' : '';
+
+      // Subscription method indicator (websocket vs polling)
+      const subInfo = subscriptionMethods[addrLower];
+      const subMethod = subInfo?.method || 'none';
+      const subIndicator = formatSubscriptionIndicator(subMethod, subInfo?.sources || [], addrLower);
+
       return `
         <tr class="${rowClass}" data-address="${addrLower}">
           <td data-label="Address" title="Score: ${scoreValue}">
             <div class="address-cell-with-pin">
+              ${subIndicator}
               ${pinIcon}
               <a class="address-link" href="https://hypurrscan.io/address/${row.address}" target="_blank" rel="noopener noreferrer">
                 ${shortAddress(row.address)}
@@ -1567,8 +1574,13 @@ async function pollPositionsUntilReady() {
 
 async function refreshSummary() {
   try {
-    const summaryUrl = `${API_BASE}/summary?period=${dashboardPeriod}&limit=${TOP_TABLE_LIMIT}`;
-    const data = await fetchJson(summaryUrl);
+    // Fetch summary and subscription data in parallel
+    const [summaryData] = await Promise.all([
+      fetchJson(`${API_BASE}/summary?period=${dashboardPeriod}&limit=${TOP_TABLE_LIMIT}`),
+      refreshSubscriptionStatus() // Shared function for subscription methods AND status
+    ]);
+    const data = summaryData;
+
     const rows = Array.isArray(data.stats)
       ? data.stats
       : Array.isArray(data.selected)
@@ -1602,14 +1614,17 @@ async function refreshSummary() {
 
 async function refreshFills() {
   try {
-    // Use legacy-specific endpoint that filters to leaderboard + pinned accounts only
-    const data = await fetchJson(`${API_BASE}/legacy/fills?limit=40`);
-    const newFills = data.fills || [];
+    // Fetch fills and subscription status in parallel
+    const [fillsData] = await Promise.all([
+      fetchJson(`${API_BASE}/legacy/fills?limit=40`),
+      refreshSubscriptionStatus() // Shared function for subscription data
+    ]);
+    const newFills = fillsData.fills || [];
 
     if (fillsCache.length === 0) {
       // Initial load - just use the new fills
       fillsCache = newFills;
-      hasMoreFills = data.hasMore !== false;
+      hasMoreFills = fillsData.hasMore !== false;
     } else {
       // Incremental update - merge new fills at the front, keeping loaded history
       // Find fills that are newer than our current newest
@@ -2271,11 +2286,40 @@ let alphaPoolLastActivity = {}; // { address: ISO timestamp }
 let alphaPoolTimeMode = 'relative'; // 'relative' or 'absolute' - toggles on click
 let alphaFillsCache = []; // Separate cache for Alpha Pool fills
 let alphaFillsLoading = false;
-let refreshStatusPolling = null;
+let refreshStatusPolling = null; // { id: number, interval: number } or null
 let lastRefreshCompleted = null;
 let isRefreshRunning = false; // Track if a refresh is in progress (for empty state message)
 let currentRefreshStatus = null; // Store full status for loading UI
 let alphaFillsTimeDisplayMode = 'absolute'; // 'absolute' or 'relative' for Alpha Pool activity time
+let subscriptionMethods = {}; // { address: { method: 'websocket'|'polling'|'none', sources: string[] } }
+let subscriptionStatus = { maxWebSocketSlots: 10, addressesByMethod: { websocket: 0, polling: 0, none: 0 } }; // Subscription status for slot tracking
+let activePopover = null; // Currently open subscription popover
+
+/**
+ * Fetch subscription status and methods (shared by all tabs)
+ * This must be called before rendering any tab that shows subscription indicators
+ */
+async function refreshSubscriptionStatus() {
+  try {
+    const [subscriptionsRes, statusRes] = await Promise.all([
+      fetch(`${API_BASE}/subscriptions/methods`),
+      fetch(`${API_BASE}/subscriptions/status`)
+    ]);
+
+    // Process subscription methods (websocket vs polling)
+    if (subscriptionsRes.ok) {
+      subscriptionMethods = await subscriptionsRes.json();
+    }
+
+    // Process subscription status for slot indicator
+    if (statusRes.ok) {
+      subscriptionStatus = await statusRes.json();
+      updateWebSocketSlotsIndicator();
+    }
+  } catch (err) {
+    console.error('Failed to fetch subscription status:', err);
+  }
+}
 
 /**
  * Fetch and render Alpha Pool data
@@ -2298,11 +2342,13 @@ async function refreshAlphaPool() {
   }
 
   try {
-    // Fetch Alpha Pool data, holdings, and last activity in parallel
+    // Fetch Alpha Pool data, holdings, last activity in parallel
+    // Also refresh subscription status (shared with Legacy tab)
     const [poolRes, holdingsRes, lastActivityRes] = await Promise.all([
       fetch(`${API_BASE}/alpha-pool`),
       fetch(`${API_BASE}/alpha-pool/holdings`),
-      fetch(`${API_BASE}/alpha-pool/last-activity`)
+      fetch(`${API_BASE}/alpha-pool/last-activity`),
+      refreshSubscriptionStatus() // Shared function for subscription data
     ]);
 
     if (!poolRes.ok) throw new Error('Failed to fetch alpha pool');
@@ -2476,12 +2522,20 @@ function renderAlphaPoolTable() {
     const lastActivity = alphaPoolLastActivity[addrLower];
     const lastActivityCell = formatAlphaLastActivity(lastActivity);
 
+    // Subscription method indicator (websocket vs polling)
+    const subInfo = subscriptionMethods[addrLower];
+    const subMethod = subInfo?.method || 'none';
+    const subIndicator = formatSubscriptionIndicator(subMethod, subInfo?.sources || [], addrLower);
+
     return `
       <tr class="${rowClass}">
         <td>
-          <a href="https://hypurrscan.io/address/${trader.address}" target="_blank" rel="noopener" class="address-link" title="${trader.address}">
-            ${displayName}
-          </a>
+          <span class="address-cell">
+            ${subIndicator}
+            <a href="https://hypurrscan.io/address/${trader.address}" target="_blank" rel="noopener" class="address-link" title="${trader.address}">
+              ${displayName}
+            </a>
+          </span>
         </td>
         <td class="holds-cell">${btcCell}</td>
         <td class="holds-cell">${ethCell}</td>
@@ -2493,6 +2547,221 @@ function renderAlphaPoolTable() {
       </tr>
     `;
   }).join('');
+}
+
+/**
+ * Format subscription method indicator (clickable for promote/demote)
+ */
+function formatSubscriptionIndicator(method, sources, address) {
+  const addrLower = (address || '').toLowerCase();
+  if (method === 'websocket') {
+    const tooltip = `Real-time WebSocket\nSources: ${sources.join(', ') || 'unknown'}\nClick to manage`;
+    return `<span class="sub-indicator sub-websocket clickable" data-testid="sub-method-${addrLower}" data-address="${addrLower}" data-method="websocket" title="${tooltip}" onclick="showSubscriptionPopover(event, '${addrLower}')">⚡</span>`;
+  } else if (method === 'polling') {
+    const tooltip = `Polling (5-min interval)\nSources: ${sources.join(', ') || 'unknown'}\nClick to promote`;
+    return `<span class="sub-indicator sub-polling clickable" data-testid="sub-method-${addrLower}" data-address="${addrLower}" data-method="polling" title="${tooltip}" onclick="showSubscriptionPopover(event, '${addrLower}')">⏱️</span>`;
+  }
+  return '';
+}
+
+/**
+ * Update WebSocket slots indicator in header
+ */
+function updateWebSocketSlotsIndicator() {
+  const indicator = document.getElementById('ws-slots-indicator');
+  const valueEl = document.getElementById('ws-slots-value');
+  if (!indicator || !valueEl) return;
+
+  const used = subscriptionStatus.addressesByMethod?.websocket || 0;
+  const max = subscriptionStatus.maxWebSocketSlots || 10;
+  const available = max - used;
+
+  valueEl.textContent = `${used}/${max}`;
+  indicator.title = `WebSocket slots: ${used} used, ${available} available`;
+
+  // Update styling based on availability
+  indicator.classList.remove('slots-available', 'slots-full');
+  if (available > 0) {
+    indicator.classList.add('slots-available');
+  } else {
+    indicator.classList.add('slots-full');
+  }
+}
+
+/**
+ * Show subscription popover for promote/demote
+ */
+function showSubscriptionPopover(event, address) {
+  event.stopPropagation();
+
+  // Close any existing popover
+  closeSubscriptionPopover();
+
+  const subInfo = subscriptionMethods[address];
+  if (!subInfo) return;
+
+  const method = subInfo.method;
+  const sources = subInfo.sources || [];
+  const isPinned = sources.includes('pinned');
+  const used = subscriptionStatus.addressesByMethod?.websocket || 0;
+  const max = subscriptionStatus.maxWebSocketSlots || 10;
+  const available = max - used;
+
+  // Create popover
+  const popover = document.createElement('div');
+  popover.className = 'sub-popover';
+  popover.id = 'sub-popover';
+  popover.setAttribute('data-testid', 'subscription-popover');
+
+  const shortAddr = `${address.slice(0, 6)}...${address.slice(-4)}`;
+  const methodIcon = method === 'websocket' ? '⚡' : '⏱️';
+  const methodLabel = method === 'websocket' ? 'WebSocket (real-time)' : 'Polling (5-min)';
+
+  let actionHtml = '';
+  let warningHtml = '';
+
+  if (method === 'websocket') {
+    // WebSocket address
+    if (isPinned) {
+      // Case 1: Pinned + WebSocket
+      // Show message that unpin is via pin icon
+      warningHtml = `<div class="sub-popover-warning" data-testid="popover-pinned-message">Pinned addresses always use WebSocket.<br>Click the pin icon to unpin and free this slot.</div>`;
+    } else {
+      // Case 2: Unpinned + WebSocket (auto-assigned or manually promoted)
+      // Can demote to polling to free a slot
+      actionHtml = `<button class="sub-popover-action demote" data-testid="demote-btn" onclick="demoteAddress('${address}')">Demote to polling</button>`;
+      warningHtml = `<div class="sub-popover-warning">Free this WebSocket slot for another address</div>`;
+    }
+  } else {
+    // Polling address
+    if (isPinned) {
+      // Case: Pinned but on polling (shouldn't happen normally, but handle it)
+      warningHtml = `<div class="sub-popover-warning">Pinned address using polling (all slots full)</div>`;
+    } else if (available > 0) {
+      // Case 4: Unpinned + Polling + slots available
+      // Can promote to WebSocket
+      actionHtml = `<button class="sub-popover-action promote" data-testid="promote-btn" onclick="promoteAddress('${address}')">Promote to WebSocket</button>`;
+      warningHtml = `<div class="sub-popover-warning" data-testid="popover-slots-available">${available} slot${available !== 1 ? 's' : ''} available</div>`;
+    } else {
+      // Case 5: Unpinned + Polling + no slots
+      // Cannot promote, must demote another first
+      warningHtml = `<div class="sub-popover-warning" data-testid="popover-no-slots">All ${max} WebSocket slots in use.<br>Demote another address to free a slot.</div>`;
+    }
+  }
+
+  popover.innerHTML = `
+    <div class="sub-popover-header">${shortAddr}</div>
+    <div class="sub-popover-method">${methodIcon} ${methodLabel}</div>
+    <div class="sub-popover-sources">Sources: ${sources.join(', ') || 'none'}</div>
+    ${actionHtml}
+    ${warningHtml}
+  `;
+
+  // Position popover near the click
+  const rect = event.target.getBoundingClientRect();
+  popover.style.position = 'fixed';
+  popover.style.top = `${rect.bottom + 5}px`;
+  popover.style.left = `${rect.left}px`;
+
+  // Ensure popover stays on screen
+  document.body.appendChild(popover);
+  const popoverRect = popover.getBoundingClientRect();
+  if (popoverRect.right > window.innerWidth - 10) {
+    popover.style.left = `${window.innerWidth - popoverRect.width - 10}px`;
+  }
+  if (popoverRect.bottom > window.innerHeight - 10) {
+    popover.style.top = `${rect.top - popoverRect.height - 5}px`;
+  }
+
+  activePopover = popover;
+
+  // Close on outside click
+  setTimeout(() => {
+    document.addEventListener('click', closeSubscriptionPopover, { once: true });
+  }, 0);
+}
+
+/**
+ * Close subscription popover
+ */
+function closeSubscriptionPopover() {
+  if (activePopover) {
+    activePopover.remove();
+    activePopover = null;
+  }
+}
+
+/**
+ * Get priority number for sources (lower = higher priority)
+ */
+function getSourcePriority(sources) {
+  const priorities = { pinned: 0, legacy: 1, 'alpha-pool': 2 };
+  let minPriority = 100;
+  for (const source of (sources || [])) {
+    const p = priorities[source] ?? 100;
+    if (p < minPriority) minPriority = p;
+  }
+  return minPriority;
+}
+
+/**
+ * Promote address to WebSocket (manual promotion)
+ */
+async function promoteAddress(address) {
+  closeSubscriptionPopover();
+
+  try {
+    // Use the new promote API endpoint
+    const response = await fetch(`${API_BASE}/subscriptions/promote`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address })
+    });
+
+    if (response.ok) {
+      // Refresh data to see updated subscriptions
+      await refreshSubscriptionStatus();
+      await refreshSummary();
+      await refreshAlphaPool();
+    } else {
+      const err = await response.json();
+      console.error('Failed to promote address:', err);
+      alert(`Failed to promote: ${err.error || 'Unknown error'}`);
+    }
+  } catch (err) {
+    console.error('Error promoting address:', err);
+    alert('Failed to promote address');
+  }
+}
+
+/**
+ * Demote address from WebSocket to polling (manual demotion)
+ */
+async function demoteAddress(address) {
+  closeSubscriptionPopover();
+
+  try {
+    // Use the new demote API endpoint
+    const response = await fetch(`${API_BASE}/subscriptions/demote`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address })
+    });
+
+    if (response.ok) {
+      // Refresh data to see updated subscriptions
+      await refreshSubscriptionStatus();
+      await refreshSummary();
+      await refreshAlphaPool();
+    } else {
+      const err = await response.json();
+      console.error('Failed to demote address:', err);
+      alert(`Failed to demote: ${err.error || 'Unknown error'}`);
+    }
+  } catch (err) {
+    console.error('Error demoting address:', err);
+    alert('Failed to demote address');
+  }
 }
 
 /**
@@ -2964,17 +3233,17 @@ async function pollRefreshStatus() {
     // If running, poll more frequently; otherwise slow down
     if (status.is_running) {
       // Poll every 2 seconds while refresh is running
-      if (!refreshStatusPolling || refreshStatusPolling._interval !== 2000) {
+      if (!refreshStatusPolling || refreshStatusPolling.interval !== 2000) {
         stopRefreshStatusPolling();
-        refreshStatusPolling = setInterval(pollRefreshStatus, 2000);
-        refreshStatusPolling._interval = 2000;
+        const id = setInterval(pollRefreshStatus, 2000);
+        refreshStatusPolling = { id, interval: 2000 };
       }
     } else {
       // Poll every 30 seconds when idle (to catch external refreshes)
-      if (!refreshStatusPolling || refreshStatusPolling._interval !== 30000) {
+      if (!refreshStatusPolling || refreshStatusPolling.interval !== 30000) {
         stopRefreshStatusPolling();
-        refreshStatusPolling = setInterval(pollRefreshStatus, 30000);
-        refreshStatusPolling._interval = 30000;
+        const id = setInterval(pollRefreshStatus, 30000);
+        refreshStatusPolling = { id, interval: 30000 };
       }
     }
   } catch (err) {
@@ -2991,8 +3260,8 @@ function startRefreshStatusPolling() {
   // Start polling immediately
   pollRefreshStatus();
   // Then continue polling at normal interval
-  refreshStatusPolling = setInterval(pollRefreshStatus, 2000);
-  refreshStatusPolling._interval = 2000;
+  const id = setInterval(pollRefreshStatus, 2000);
+  refreshStatusPolling = { id, interval: 2000 };
 }
 
 /**
@@ -3000,7 +3269,7 @@ function startRefreshStatusPolling() {
  */
 function stopRefreshStatusPolling() {
   if (refreshStatusPolling) {
-    clearInterval(refreshStatusPolling);
+    clearInterval(refreshStatusPolling.id);
     refreshStatusPolling = null;
   }
 }
@@ -3009,6 +3278,10 @@ function stopRefreshStatusPolling() {
 window.triggerAlphaPoolRefresh = triggerAlphaPoolRefresh;
 window.refreshAlphaPool = refreshAlphaPool;
 window.refreshAlphaFills = refreshAlphaFills;
+window.showSubscriptionPopover = showSubscriptionPopover;
+window.closeSubscriptionPopover = closeSubscriptionPopover;
+window.promoteAddress = promoteAddress;
+window.demoteAddress = demoteAddress;
 
 // Initialize Alpha Pool on page load (if tab is active)
 if (document.querySelector('.tab-btn.active[data-tab="alpha-pool"]')) {
