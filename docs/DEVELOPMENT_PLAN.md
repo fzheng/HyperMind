@@ -505,7 +505,8 @@ LOSS_STREAK_PAUSE_SECONDS=3600  # 1 hour pause
 - Exchange: 30 tests
 - Regime: 39 tests
 - Risk Governor: 27 tests + circuit breaker extensions
-- **Python total: 348 tests**
+- Integration: 7 fail-closed tests (retry, metrics)
+- **Python total: 384 tests**
 - **TypeScript total: 1,035 tests**
 
 ---
@@ -600,6 +601,16 @@ Wire together the Phase 4/5 components into the live signal/execution pipeline.
 - [x] Increment `effk_default_fallback_counter` when default ρ used
 - [x] Regime included in execution context
 
+#### 5. Safety Hardening ✅
+- [x] Fail-closed on account state unavailable (block trading, don't proceed)
+- [x] Retry with exponential backoff for account state fetch (3 retries, 500ms base)
+- [x] Safety block metrics (`decide_safety_block_total{guard=...}`)
+  - `kill_switch` - Daily drawdown triggered
+  - `account_state` - API unavailable after retries
+  - `risk_governor` - Liquidation/exposure limits
+  - `circuit_breaker` - Position/API/loss limits
+- [x] All safety checks emit metrics for Grafana dashboards
+
 ### Success Criteria
 | Criteria | Pass Condition |
 |----------|----------------|
@@ -607,6 +618,7 @@ Wire together the Phase 4/5 components into the live signal/execution pipeline.
 | Risk governor blocks | Signals rejected when risk limits exceeded |
 | Real execution works | Orders placed on testnet with `REAL_EXECUTION_ENABLED=true` |
 | Metrics emitted | Grafana shows weight_gini, effK values |
+| Safety fail-closed | API failures block trading, metrics show block reason |
 
 ---
 
@@ -779,4 +791,4 @@ docker compose logs -f hl-decide
 
 ---
 
-*Last updated: December 13, 2025 (Phase 4-5 Integration Complete)*
+*Last updated: December 13, 2025 (Phase 4-5 Integration Complete + Safety Hardening)*

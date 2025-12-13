@@ -86,7 +86,14 @@ Built with TypeScript, Python, PostgreSQL, NATS, and Docker. Event-driven micros
 
 ## Status
 
-Core infrastructure is complete. Currently in Phase 3b development—adding Thompson Sampling exploration and dynamic risk inputs.
+**Phase 4-5 Complete** — Core algorithm, risk management, and market regime detection are fully integrated.
+
+Current capabilities:
+- Kelly criterion position sizing with regime adjustments
+- Daily drawdown kill switch and circuit breakers
+- Market regime detection (trending/ranging/volatile)
+- Fail-closed safety posture with retry and metrics
+- 384 Python + 1,035 TypeScript tests passing
 
 ## License
 

@@ -13,6 +13,7 @@ Features:
 @module executor
 """
 
+import asyncio
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -36,6 +37,48 @@ from .kelly import (
 # Hyperliquid API endpoints
 HL_INFO_API = os.getenv("HL_INFO_API", "https://api.hyperliquid.xyz/info")
 HL_EXCHANGE_API = os.getenv("HL_EXCHANGE_API", "https://api.hyperliquid.xyz/exchange")
+
+# Retry configuration for account state fetch
+ACCOUNT_STATE_MAX_RETRIES = int(os.getenv("ACCOUNT_STATE_MAX_RETRIES", "3"))
+ACCOUNT_STATE_BASE_DELAY_MS = int(os.getenv("ACCOUNT_STATE_BASE_DELAY_MS", "500"))
+
+
+# Safety block metrics (lazy-loaded to avoid circular imports)
+_safety_block_counter = None
+
+
+def get_safety_block_counter():
+    """Get or create the safety block counter (lazy load)."""
+    global _safety_block_counter
+    if _safety_block_counter is None:
+        try:
+            from prometheus_client import Counter
+            # Import registry from main to share metrics
+            from .main import registry
+            _safety_block_counter = Counter(
+                "decide_safety_block_total",
+                "Execution blocked by safety checks",
+                labelnames=["guard"],  # kill_switch, account_state, risk_governor, circuit_breaker
+                registry=registry,
+            )
+        except Exception as e:
+            print(f"[executor] Failed to initialize safety metrics: {e}")
+            # Return a dummy counter that does nothing
+            class DummyCounter:
+                def labels(self, **kwargs):
+                    return self
+                def inc(self):
+                    pass
+            _safety_block_counter = DummyCounter()
+    return _safety_block_counter
+
+
+def increment_safety_block(guard: str):
+    """Increment safety block counter for a specific guard."""
+    try:
+        get_safety_block_counter().labels(guard=guard).inc()
+    except Exception:
+        pass  # Don't let metrics failures affect execution
 
 
 @dataclass
@@ -114,6 +157,40 @@ class HyperliquidExecutor:
         except Exception as e:
             print(f"[executor] Failed to fetch account state: {e}")
             return None
+
+    async def get_account_state_with_retry(self) -> dict:
+        """
+        Fetch account state with exponential backoff retry.
+
+        Retries up to ACCOUNT_STATE_MAX_RETRIES times with exponential backoff.
+        Raises exception if all retries fail (fail-closed behavior).
+
+        Returns:
+            Account state dict
+
+        Raises:
+            Exception: If all retries fail
+        """
+        last_error: Optional[Exception] = None
+
+        for attempt in range(ACCOUNT_STATE_MAX_RETRIES):
+            try:
+                result = await self.get_account_state()
+                if result is not None:
+                    return result
+                # get_account_state returned None - treat as failure
+                last_error = Exception("Account state returned None")
+            except Exception as e:
+                last_error = e
+
+            # Exponential backoff: 500ms, 1000ms, 2000ms
+            if attempt < ACCOUNT_STATE_MAX_RETRIES - 1:
+                delay_ms = ACCOUNT_STATE_BASE_DELAY_MS * (2 ** attempt)
+                print(f"[executor] Account state fetch attempt {attempt + 1} failed, retrying in {delay_ms}ms...")
+                await asyncio.sleep(delay_ms / 1000)
+
+        # All retries exhausted
+        raise Exception(f"Account state fetch failed after {ACCOUNT_STATE_MAX_RETRIES} attempts: {last_error}")
 
     async def get_account_value(self) -> float:
         """
@@ -233,19 +310,22 @@ class HyperliquidExecutor:
         if account_value <= 0:
             return False, "No account value", context
 
-        # Fetch account state once for reuse (kill switch check, sizing, circuit breaker)
+        # Fetch account state with retry (kill switch check, sizing, circuit breaker)
         try:
-            account_state = await self.get_account_state()
+            account_state = await self.get_account_state_with_retry()
             context["account_state"] = account_state
 
             # Quick kill switch check (does NOT validate proposed size - that comes after sizing)
             from .risk_governor import get_risk_governor
             governor = get_risk_governor(db)
             if governor.is_kill_switch_active():
+                increment_safety_block("kill_switch")
                 return False, "Risk governor: Kill switch active", context
         except Exception as e:
-            print(f"[executor] Account state fetch failed: {e}")
-            account_state = None
+            # Fail-closed: block execution when account state unavailable after retries
+            print(f"[executor] Account state fetch failed after retries: {e}")
+            increment_safety_block("account_state")
+            return False, f"Account state unavailable: {e}", context
 
         # Check exposure limit
         current_exposure = await self.get_current_exposure()
@@ -323,9 +403,13 @@ class HyperliquidExecutor:
                     reason_str = risk_result.reason or "Risk governor blocked (size check)"
                     context["risk_governor_reason"] = reason_str
                     context["risk_governor_warnings"] = risk_result.warnings
+                    increment_safety_block("risk_governor")
                     return False, f"Risk governor: {reason_str}", context
         except Exception as e:
-            print(f"[executor] Risk governor size check failed (allowing execution): {e}")
+            # Fail-closed: block execution when risk check fails
+            print(f"[executor] Risk governor size check failed: {e}")
+            increment_safety_block("risk_governor")
+            return False, f"Risk governor check failed: {e}", context
 
         # Circuit breaker check (applies to both real and simulated execution)
         try:
@@ -342,9 +426,13 @@ class HyperliquidExecutor:
             cb_result = governor.run_circuit_breaker_checks(symbol, symbol_position_count)
             if not cb_result.allowed:
                 context["circuit_breaker_reason"] = cb_result.reason
+                increment_safety_block("circuit_breaker")
                 return False, f"Circuit breaker: {cb_result.reason}", context
         except Exception as e:
-            print(f"[executor] Circuit breaker check failed (allowing execution): {e}")
+            # Fail-closed: block execution when circuit breaker check fails
+            increment_safety_block("circuit_breaker")
+            print(f"[executor] Circuit breaker check failed: {e}")
+            return False, f"Circuit breaker check failed: {e}", context
 
         return True, "Validation passed", context
 

@@ -1760,6 +1760,249 @@ class TestCircuitBreakerPositionTracking:
         assert result.allowed is True
 
 
+class TestFailClosedBehavior:
+    """Test fail-closed safety behavior when account state unavailable."""
+
+    @pytest.mark.asyncio
+    async def test_account_state_failure_blocks_execution_after_retries(self):
+        """Verify execution is blocked when account state fetch fails after all retries."""
+        from app.executor import HyperliquidExecutor
+
+        executor = HyperliquidExecutor()
+
+        # Mock get_account_value to return valid value
+        executor.get_account_value = AsyncMock(return_value=100000.0)
+
+        # Mock get_account_state_with_retry to raise exception (simulates all retries failed)
+        executor.get_account_state_with_retry = AsyncMock(
+            side_effect=Exception("Account state fetch failed after 3 attempts: API unavailable")
+        )
+
+        mock_db = MagicMock()
+
+        # Config that enables trading
+        config = {
+            "enabled": True,
+            "hyperliquid": {
+                "enabled": True,
+                "address": "0x1234567890123456789012345678901234567890",
+            },
+        }
+
+        allowed, reason, context = await executor.validate_execution(
+            db=mock_db,
+            symbol="BTC",
+            direction="long",
+            config=config,
+            consensus_addresses=["0x123"],
+        )
+
+        assert allowed is False
+        assert "Account state unavailable" in reason
+
+    @pytest.mark.asyncio
+    async def test_account_state_retry_succeeds_on_second_attempt(self):
+        """Verify execution proceeds if account state succeeds after initial failures."""
+        from app.executor import HyperliquidExecutor, ACCOUNT_STATE_MAX_RETRIES
+
+        executor = HyperliquidExecutor()
+        executor.address = "0x1234567890123456789012345678901234567890"
+
+        # Mock get_account_state to fail twice then succeed
+        call_count = 0
+        async def mock_get_account_state():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                return None  # Simulates failure (returns None)
+            return {
+                "marginSummary": {
+                    "accountValue": "100000",
+                    "totalMarginUsed": "1000",
+                },
+                "assetPositions": [],
+            }
+
+        executor.get_account_state = mock_get_account_state
+
+        # Should succeed on third attempt
+        result = await executor.get_account_state_with_retry()
+        assert result is not None
+        assert call_count == 3  # Called 3 times before success
+
+    @pytest.mark.asyncio
+    async def test_account_state_success_continues_validation(self):
+        """Verify execution proceeds past account state check when available."""
+        from app.executor import HyperliquidExecutor
+
+        executor = HyperliquidExecutor()
+
+        account_state = {
+            "marginSummary": {
+                "accountValue": "100000",
+                "totalMarginUsed": "1000",
+                "totalRawUsd": "90000",
+            },
+            "crossMaintenanceMarginUsed": "500",
+            "assetPositions": [],
+        }
+
+        # Mock successful account state response (with retry)
+        executor.get_account_value = AsyncMock(return_value=100000.0)
+        executor.get_account_state_with_retry = AsyncMock(return_value=account_state)
+        # Mock exposure to exceed limit to trigger a different rejection
+        executor.get_current_exposure = AsyncMock(return_value=0.99)  # 99% exposure
+
+        mock_db = MagicMock()
+
+        # Config that enables trading
+        config = {
+            "enabled": True,
+            "hyperliquid": {
+                "enabled": True,
+                "address": "0x1234567890123456789012345678901234567890",
+                "max_exposure_pct": 10,  # 10% max exposure
+            },
+        }
+
+        # Patch risk governor for kill switch check
+        with patch("app.risk_governor.get_risk_governor") as mock_gov:
+            mock_governor = MagicMock()
+            mock_governor.is_kill_switch_active.return_value = False
+            mock_gov.return_value = mock_governor
+
+            allowed, reason, context = await executor.validate_execution(
+                db=mock_db,
+                symbol="BTC",
+                direction="long",
+                config=config,
+                consensus_addresses=None,
+            )
+
+        # We expect to fail on exposure limit, NOT on account_state
+        # This proves we got past the account_state check
+        assert allowed is False
+        assert "Exposure" in reason or "exposure" in reason.lower()
+        assert "Account state unavailable" not in reason
+
+    @pytest.mark.asyncio
+    async def test_retry_exhausts_all_attempts_before_failing(self):
+        """Verify all retry attempts are made before failing."""
+        from app.executor import HyperliquidExecutor, ACCOUNT_STATE_MAX_RETRIES
+
+        executor = HyperliquidExecutor()
+        executor.address = "0x1234567890123456789012345678901234567890"
+
+        # Mock get_account_state to always return None
+        call_count = 0
+        async def mock_get_account_state():
+            nonlocal call_count
+            call_count += 1
+            return None
+
+        executor.get_account_state = mock_get_account_state
+
+        # Should fail after all retries
+        with pytest.raises(Exception) as exc_info:
+            await executor.get_account_state_with_retry()
+
+        assert call_count == ACCOUNT_STATE_MAX_RETRIES
+        assert "failed after" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_retry_succeeds_immediately_on_first_attempt(self):
+        """Verify no unnecessary retries when first attempt succeeds."""
+        from app.executor import HyperliquidExecutor
+
+        executor = HyperliquidExecutor()
+        executor.address = "0x1234567890123456789012345678901234567890"
+
+        call_count = 0
+        async def mock_get_account_state():
+            nonlocal call_count
+            call_count += 1
+            return {"marginSummary": {"accountValue": "100000"}, "assetPositions": []}
+
+        executor.get_account_state = mock_get_account_state
+
+        result = await executor.get_account_state_with_retry()
+        assert result is not None
+        assert call_count == 1  # Only called once
+
+    @pytest.mark.asyncio
+    async def test_safety_block_metric_incremented_on_kill_switch(self):
+        """Verify safety block metric is called when kill switch blocks."""
+        from app.executor import HyperliquidExecutor, increment_safety_block
+
+        executor = HyperliquidExecutor()
+        executor.get_account_value = AsyncMock(return_value=100000.0)
+        executor.get_account_state_with_retry = AsyncMock(return_value={
+            "marginSummary": {"accountValue": "100000"},
+            "assetPositions": [],
+        })
+
+        mock_db = MagicMock()
+        config = {
+            "enabled": True,
+            "hyperliquid": {
+                "enabled": True,
+                "address": "0x1234567890123456789012345678901234567890",
+            },
+        }
+
+        # Patch risk governor to have kill switch active
+        with patch("app.risk_governor.get_risk_governor") as mock_gov, \
+             patch("app.executor.increment_safety_block") as mock_metric:
+            mock_governor = MagicMock()
+            mock_governor.is_kill_switch_active.return_value = True
+            mock_gov.return_value = mock_governor
+
+            allowed, reason, _ = await executor.validate_execution(
+                db=mock_db,
+                symbol="BTC",
+                direction="long",
+                config=config,
+                consensus_addresses=None,
+            )
+
+            assert allowed is False
+            assert "Kill switch" in reason
+            mock_metric.assert_called_once_with("kill_switch")
+
+    @pytest.mark.asyncio
+    async def test_safety_block_metric_incremented_on_account_state_failure(self):
+        """Verify safety block metric is called when account state fails."""
+        from app.executor import HyperliquidExecutor
+
+        executor = HyperliquidExecutor()
+        executor.get_account_value = AsyncMock(return_value=100000.0)
+        executor.get_account_state_with_retry = AsyncMock(
+            side_effect=Exception("API unavailable after retries")
+        )
+
+        mock_db = MagicMock()
+        config = {
+            "enabled": True,
+            "hyperliquid": {
+                "enabled": True,
+                "address": "0x1234567890123456789012345678901234567890",
+            },
+        }
+
+        with patch("app.executor.increment_safety_block") as mock_metric:
+            allowed, reason, _ = await executor.validate_execution(
+                db=mock_db,
+                symbol="BTC",
+                direction="long",
+                config=config,
+                consensus_addresses=None,
+            )
+
+            assert allowed is False
+            assert "Account state unavailable" in reason
+            mock_metric.assert_called_once_with("account_state")
+
+
 class TestMigrationVerification:
     """Test that required migrations exist."""
 
