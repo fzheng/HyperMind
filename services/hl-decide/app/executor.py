@@ -233,23 +233,19 @@ class HyperliquidExecutor:
         if account_value <= 0:
             return False, "No account value", context
 
-        # Risk Governor hard limits check
+        # Fetch account state once for reuse (kill switch check, sizing, circuit breaker)
         try:
-            from .risk_governor import check_risk_before_trade
             account_state = await self.get_account_state()
-            if account_state:
-                # Note: proposed_size_usd will be refined after Kelly sizing
-                risk_result = await check_risk_before_trade(db, account_state, proposed_size_usd=0)
-                if not risk_result.allowed:
-                    reason_str = risk_result.reason or "Risk governor blocked"
-                    context["risk_governor_reason"] = reason_str
-                    context["risk_governor_warnings"] = risk_result.warnings
-                    return False, f"Risk governor: {reason_str}", context
-                # Store warnings for logging
-                if risk_result.warnings:
-                    context["risk_governor_warnings"] = risk_result.warnings
+            context["account_state"] = account_state
+
+            # Quick kill switch check (does NOT validate proposed size - that comes after sizing)
+            from .risk_governor import get_risk_governor
+            governor = get_risk_governor(db)
+            if governor.is_kill_switch_active():
+                return False, "Risk governor: Kill switch active", context
         except Exception as e:
-            print(f"[executor] Risk governor check failed (allowing execution): {e}")
+            print(f"[executor] Account state fetch failed: {e}")
+            account_state = None
 
         # Check exposure limit
         current_exposure = await self.get_current_exposure()
@@ -336,24 +332,16 @@ class HyperliquidExecutor:
             from .risk_governor import get_risk_governor
             governor = get_risk_governor(db)
 
-            # Update position counts from account state before checking
-            account_state = context.get("account_state") or await self.get_account_state()
+            # Update position counts from account state using public method
+            account_state = context.get("account_state")
+            if not account_state:
+                account_state = await self.get_account_state()
             if account_state:
-                # Count current positions per symbol from account state
-                positions_by_symbol: dict[str, int] = {}
-                for ap in account_state.get("assetPositions", []):
-                    pos = ap.get("position", {})
-                    coin = pos.get("coin", "")
-                    size = float(pos.get("szi", 0))
-                    if size != 0 and coin:
-                        positions_by_symbol[coin] = positions_by_symbol.get(coin, 0) + 1
+                governor.update_positions_from_account_state(account_state)
 
-                # Update governor with current position counts
-                governor._current_position_count = sum(positions_by_symbol.values())
-                governor._positions_by_symbol = positions_by_symbol
-
-            has_existing_position = symbol in governor._positions_by_symbol
-            cb_result = governor.run_circuit_breaker_checks(symbol, has_existing_position)
+            # Pass per-symbol count for future multi-position support
+            symbol_position_count = governor.get_symbol_position_count(symbol)
+            cb_result = governor.run_circuit_breaker_checks(symbol, symbol_position_count)
             if not cb_result.allowed:
                 context["circuit_breaker_reason"] = cb_result.reason
                 return False, f"Circuit breaker: {cb_result.reason}", context

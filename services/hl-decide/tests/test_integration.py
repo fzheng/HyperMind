@@ -1600,8 +1600,8 @@ class TestCircuitBreakerIntegration:
         for _ in range(5):  # More than threshold
             governor.report_api_error()
 
-        # Now check circuit breakers
-        result = governor.run_circuit_breaker_checks("BTC", has_existing_position=False)
+        # Now check circuit breakers (0 = no existing position)
+        result = governor.run_circuit_breaker_checks("BTC", symbol_position_count=0)
 
         assert result.allowed is False
         assert "pause" in result.reason.lower() or "api" in result.reason.lower()
@@ -1616,7 +1616,7 @@ class TestCircuitBreakerIntegration:
         for _ in range(MAX_CONSECUTIVE_LOSSES + 1):
             governor.report_trade_result(is_win=False)
 
-        result = governor.run_circuit_breaker_checks("BTC", has_existing_position=False)
+        result = governor.run_circuit_breaker_checks("BTC", symbol_position_count=0)
 
         assert result.allowed is False
         assert "loss" in result.reason.lower() or "streak" in result.reason.lower()
@@ -1627,7 +1627,7 @@ class TestCircuitBreakerIntegration:
 
         governor = RiskGovernor()
 
-        result = governor.run_circuit_breaker_checks("BTC", has_existing_position=False)
+        result = governor.run_circuit_breaker_checks("BTC", symbol_position_count=0)
 
         assert result.allowed is True
 
@@ -1679,18 +1679,30 @@ class TestCircuitBreakerPositionTracking:
     """Test circuit breaker with actual position data."""
 
     def test_position_count_from_account_state(self):
-        """Governor should track positions from account state."""
+        """Governor should track positions from account state using public method."""
         from app.risk_governor import RiskGovernor, MAX_CONCURRENT_POSITIONS
 
         governor = RiskGovernor()
 
-        # Simulate updating position counts from account state
-        positions_by_symbol = {"BTC": 1, "ETH": 1, "SOL": 1}
-        governor._current_position_count = 3
-        governor._positions_by_symbol = positions_by_symbol
+        # Use public method to update from account state
+        mock_account_state = {
+            "assetPositions": [
+                {"position": {"coin": "BTC", "szi": "0.1"}},
+                {"position": {"coin": "ETH", "szi": "-0.5"}},
+                {"position": {"coin": "SOL", "szi": "10"}},
+            ]
+        }
+        governor.update_positions_from_account_state(mock_account_state)
+
+        # Verify position counts
+        assert governor._current_position_count == 3
+        assert governor.get_symbol_position_count("BTC") == 1
+        assert governor.get_symbol_position_count("ETH") == 1
+        assert governor.get_symbol_position_count("SOL") == 1
+        assert governor.get_symbol_position_count("DOGE") == 0
 
         # Now check if we can open another position (depends on MAX_CONCURRENT_POSITIONS)
-        result = governor.run_circuit_breaker_checks("DOGE", has_existing_position=False)
+        result = governor.run_circuit_breaker_checks("DOGE", symbol_position_count=0)
 
         # Default MAX_CONCURRENT_POSITIONS is 3, so this should be blocked
         if MAX_CONCURRENT_POSITIONS == 3:
@@ -1707,8 +1719,8 @@ class TestCircuitBreakerPositionTracking:
         governor._current_position_count = 1
         governor._positions_by_symbol = {"BTC": 1}
 
-        # Adding to BTC position with has_existing_position=True
-        result = governor.run_circuit_breaker_checks("BTC", has_existing_position=True)
+        # Adding to BTC position with count=1 (existing position)
+        result = governor.run_circuit_breaker_checks("BTC", symbol_position_count=1)
 
         # When MAX_POSITION_PER_SYMBOL is 1, this should be blocked
         if MAX_POSITION_PER_SYMBOL == 1:
@@ -1726,11 +1738,26 @@ class TestCircuitBreakerPositionTracking:
         governor._positions_by_symbol = {"BTC": MAX_POSITION_PER_SYMBOL}
 
         # Adding another BTC position should be blocked
-        result = governor.run_circuit_breaker_checks("BTC", has_existing_position=True)
+        result = governor.run_circuit_breaker_checks("BTC", symbol_position_count=MAX_POSITION_PER_SYMBOL)
 
         # If MAX_POSITION_PER_SYMBOL is 1, this should be blocked
         if MAX_POSITION_PER_SYMBOL == 1:
             assert result.allowed is False
+
+    def test_new_symbol_position_allowed(self):
+        """New position in a different symbol should be allowed."""
+        from app.risk_governor import RiskGovernor
+
+        governor = RiskGovernor()
+
+        # Have one BTC position
+        governor._current_position_count = 1
+        governor._positions_by_symbol = {"BTC": 1}
+
+        # Opening new position in ETH (count=0) should be allowed
+        result = governor.run_circuit_breaker_checks("ETH", symbol_position_count=0)
+
+        assert result.allowed is True
 
 
 class TestMigrationVerification:

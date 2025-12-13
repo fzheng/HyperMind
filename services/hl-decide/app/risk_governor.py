@@ -635,7 +635,7 @@ class RiskGovernor:
 
     def update_position_count(self, symbol: str, delta: int) -> None:
         """
-        Update position tracking.
+        Update position tracking incrementally.
 
         Args:
             symbol: Asset symbol
@@ -647,17 +647,51 @@ class RiskGovernor:
         current = self._positions_by_symbol.get(symbol, 0)
         self._positions_by_symbol[symbol] = max(0, current + delta)
 
+    def update_positions_from_account_state(self, account_state: Dict[str, Any]) -> None:
+        """
+        Update position tracking from Hyperliquid account state.
+
+        Derives per-symbol position counts from assetPositions array.
+        This is the preferred method to sync governor state with actual positions.
+
+        Args:
+            account_state: Account state from Hyperliquid API containing assetPositions
+        """
+        positions_by_symbol: Dict[str, int] = {}
+
+        for ap in account_state.get("assetPositions", []):
+            pos = ap.get("position", {})
+            coin = pos.get("coin", "")
+            size = float(pos.get("szi", 0))
+            if size != 0 and coin:
+                positions_by_symbol[coin] = positions_by_symbol.get(coin, 0) + 1
+
+        self._current_position_count = sum(positions_by_symbol.values())
+        self._positions_by_symbol = positions_by_symbol
+
+    def get_symbol_position_count(self, symbol: str) -> int:
+        """
+        Get current position count for a symbol.
+
+        Args:
+            symbol: Asset symbol
+
+        Returns:
+            Number of positions in this symbol (0 if none)
+        """
+        return self._positions_by_symbol.get(symbol, 0)
+
     def run_circuit_breaker_checks(
         self,
         symbol: str,
-        has_existing_position: bool = False,
+        symbol_position_count: int = 0,
     ) -> RiskCheckResult:
         """
         Run all circuit breaker checks before a trade.
 
         Args:
             symbol: Asset symbol to trade
-            has_existing_position: Whether already have position in this symbol
+            symbol_position_count: Current number of positions in this symbol (0 if new)
 
         Returns:
             RiskCheckResult with aggregated result
@@ -680,8 +714,9 @@ class RiskGovernor:
             return pos_check
         all_warnings.extend(pos_check.warnings)
 
-        # 4. Symbol position check
-        symbol_check = self.check_symbol_position(symbol, has_existing_position)
+        # 4. Symbol position check (pass count for future multi-position support)
+        has_existing = symbol_position_count > 0
+        symbol_check = self.check_symbol_position(symbol, has_existing)
         if not symbol_check.allowed:
             return symbol_check
 
@@ -711,9 +746,18 @@ async def get_daily_pnl(db_pool: asyncpg.Pool, current_equity: float) -> float:
     If no record exists for today, creates one with current equity as starting.
     Returns the difference: current_equity - starting_equity.
 
+    **Important**: This is EQUITY-BASED (not realized-only), meaning it includes
+    both realized and unrealized PnL. The kill switch will trigger if total
+    equity drops by the threshold amount, even from unrealized losses. This is
+    intentional - we want to halt trading when the account is under stress,
+    regardless of whether losses are realized.
+
+    The daily record resets on first call each day (UTC). Starting equity is
+    captured from the first account state query of the day.
+
     Args:
         db_pool: Database pool
-        current_equity: Current account equity
+        current_equity: Current account equity (realized + unrealized)
 
     Returns:
         Daily PnL (positive = profit, negative = loss)
