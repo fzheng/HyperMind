@@ -169,9 +169,32 @@ class RiskGovernor:
             self._daily_starting_equity = equity
             self._daily_start_date = today
 
+    def is_kill_switch_active(self) -> bool:
+        """
+        Quick check if kill switch is currently active.
+
+        This is a lightweight check for early bailout. Does NOT update cooldown state.
+        Use check_kill_switch() for full check with reason and cooldown handling.
+
+        Returns:
+            True if kill switch is active
+        """
+        if not self._kill_switch_active:
+            return False
+
+        # Check if cooldown has expired (but don't modify state)
+        if self._kill_switch_triggered_at:
+            elapsed = (datetime.now(timezone.utc) - self._kill_switch_triggered_at).total_seconds()
+            if elapsed >= KILL_SWITCH_COOLDOWN:
+                return False  # Will be reset on next full check
+
+        return True
+
     def check_kill_switch(self) -> Tuple[bool, str]:
         """
-        Check if kill switch is active.
+        Check if kill switch is active and return reason.
+
+        This is the full check that handles cooldown expiry.
 
         Returns:
             Tuple of (is_active, reason)

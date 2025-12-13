@@ -313,10 +313,10 @@ class HyperliquidExecutor:
         if new_exposure > max_exposure:
             return False, f"Trade would exceed exposure limit ({new_exposure:.1%} > {max_exposure:.1%})", context
 
-        # Re-run risk governor with actual proposed size
+        # Re-run risk governor with actual proposed size (reuse cached account_state)
         try:
             from .risk_governor import check_risk_before_trade
-            account_state = await self.get_account_state()
+            account_state = context.get("account_state")
             if account_state:
                 risk_result = await check_risk_before_trade(db, account_state, proposed_size_usd=size_usd)
                 if not risk_result.allowed:
@@ -332,10 +332,8 @@ class HyperliquidExecutor:
             from .risk_governor import get_risk_governor
             governor = get_risk_governor(db)
 
-            # Update position counts from account state using public method
+            # Update position counts from account state using public method (reuse cached)
             account_state = context.get("account_state")
-            if not account_state:
-                account_state = await self.get_account_state()
             if account_state:
                 governor.update_positions_from_account_state(account_state)
 

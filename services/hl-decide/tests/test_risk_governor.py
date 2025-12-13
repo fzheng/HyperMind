@@ -201,6 +201,17 @@ class TestKillSwitch:
         active, reason = governor.check_kill_switch()
         assert active is False
 
+    def test_is_kill_switch_active_initially_false(self):
+        """Quick check should return False when inactive."""
+        governor = RiskGovernor()
+        assert governor.is_kill_switch_active() is False
+
+    def test_is_kill_switch_active_after_trigger(self):
+        """Quick check should return True after trigger."""
+        governor = RiskGovernor()
+        governor.trigger_kill_switch("Test trigger")
+        assert governor.is_kill_switch_active() is True
+
     def test_kill_switch_can_be_triggered(self):
         """Kill switch should be triggerable."""
         governor = RiskGovernor()
