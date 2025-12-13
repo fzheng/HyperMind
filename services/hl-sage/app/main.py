@@ -60,6 +60,18 @@ from .bandit import (
     BANDIT_SELECT_K,
     BANDIT_POOL_SIZE,
 )
+from .snapshot import (
+    create_daily_snapshot,
+    get_snapshot_summary,
+    load_universe_at_date,
+    SELECTION_VERSION,
+)
+from .walkforward import (
+    run_walk_forward_replay,
+    replay_single_period,
+    format_replay_summary,
+    REPLAY_EVALUATION_DAYS,
+)
 
 SERVICE_NAME = "hl-sage"
 OWNER_TOKEN = os.getenv("OWNER_TOKEN", "dev-owner")
@@ -69,6 +81,10 @@ DB_URL = os.getenv("DATABASE_URL", "postgresql://hlbot:hlbotpassword@0.0.0.0:543
 MAX_TRACKED_ADDRESSES = int(os.getenv("MAX_TRACKED_ADDRESSES", "1000"))
 MAX_SCORES = int(os.getenv("MAX_SCORES", "500"))
 STALE_THRESHOLD_HOURS = int(os.getenv("STALE_THRESHOLD_HOURS", "24"))
+
+# Daily snapshot configuration
+SNAPSHOT_ENABLED = os.getenv("SNAPSHOT_ENABLED", "true").lower() == "true"
+SNAPSHOT_HOUR_UTC = int(os.getenv("SNAPSHOT_HOUR_UTC", "0"))  # Default: midnight UTC
 
 
 @asynccontextmanager
@@ -102,6 +118,10 @@ async def lifespan(app: FastAPI):
 
         # Start periodic Alpha Pool refresh (every ALPHA_POOL_REFRESH_HOURS)
         asyncio.create_task(periodic_alpha_pool_refresh())
+
+        # Start daily snapshot job (Phase 3f: Shadow Ledger)
+        if SNAPSHOT_ENABLED:
+            asyncio.create_task(periodic_daily_snapshot())
     except Exception as e:
         print(f"[hl-sage] Fatal startup error: {e}")
         raise
@@ -400,11 +420,18 @@ async def get_trader_nig_params(address: str) -> Optional[Dict[str, Any]]:
 
 
 ALPHA_POOL_AUTO_REFRESH = os.getenv("ALPHA_POOL_AUTO_REFRESH", "true").lower() == "true"
+ALPHA_POOL_AUTO_INIT = os.getenv("ALPHA_POOL_AUTO_INIT", "true").lower() == "true"
+ALPHA_POOL_AUTO_INIT_DELAY_MS = int(os.getenv("ALPHA_POOL_AUTO_INIT_DELAY_MS", "500"))
 
 
 async def auto_refresh_alpha_pool_if_empty():
     """
-    Auto-refresh Alpha Pool on startup ONLY if it has NEVER been refreshed.
+    Auto-initialize Alpha Pool on startup if it has NEVER been refreshed.
+
+    This is the main fresh-install initialization flow:
+    1. Detects if this is a fresh database (no records in alpha_pool_addresses)
+    2. Refreshes the pool from Hyperliquid leaderboard (auto-backfills new addresses)
+    3. Creates an initial snapshot for FDR qualification
 
     Checks if alpha_pool_addresses table has ANY records (active or not).
     If completely empty, this is a fresh database and we bootstrap the pool.
@@ -428,15 +455,30 @@ async def auto_refresh_alpha_pool_if_empty():
             )
 
         if total_count == 0:
-            print(f"[hl-sage] Alpha Pool has never been refreshed, auto-refreshing (first-time setup)...")
-            # Use _background_refresh_task to properly set is_running=true
-            # This allows the dashboard to detect the refresh is in progress
+            print(f"[hl-sage] Fresh install detected: Alpha Pool is empty")
+            print(f"[hl-sage] Starting automatic initialization...")
+
+            # Step 1: Refresh Alpha Pool from leaderboard (includes auto-backfill)
+            print(f"[hl-sage] [1/2] Refreshing Alpha Pool from leaderboard...")
             await _background_refresh_task(limit=ALPHA_POOL_DEFAULT_SIZE)
+
+            # Step 2: Create initial snapshot for FDR qualification
+            if ALPHA_POOL_AUTO_INIT:
+                print(f"[hl-sage] [2/2] Creating initial snapshot for FDR qualification...")
+                try:
+                    snapshot_result = await create_daily_snapshot(app.state.db)
+                    fdr_count = snapshot_result.get("fdr_qualified", 0)
+                    total = snapshot_result.get("total_traders", 0)
+                    print(f"[hl-sage] Initial snapshot created: {fdr_count}/{total} traders FDR-qualified")
+                except Exception as snapshot_err:
+                    print(f"[hl-sage] Initial snapshot failed: {snapshot_err}")
+
+            print(f"[hl-sage] Automatic initialization complete!")
         else:
-            print(f"[hl-sage] Alpha Pool has {total_count} records (previously refreshed), skipping auto-refresh")
+            print(f"[hl-sage] Alpha Pool has {total_count} records (previously refreshed), skipping auto-init")
     except Exception as e:
         await _refresh_state.fail(str(e))
-        print(f"[hl-sage] Alpha Pool auto-refresh failed: {e}")
+        print(f"[hl-sage] Alpha Pool auto-init failed: {e}")
 
 
 # Interval for periodic Alpha Pool fill sync (in seconds)
@@ -676,6 +718,64 @@ async def periodic_alpha_pool_refresh():
 
         # Check every hour
         await asyncio.sleep(3600)
+
+
+async def periodic_daily_snapshot():
+    """
+    Create daily snapshots for the Shadow Ledger (Phase 3f: Selection Integrity).
+
+    Runs at SNAPSHOT_HOUR_UTC (default: midnight) and captures the state of all
+    traders for survivorship-bias-free analysis.
+
+    The snapshot includes:
+    - Universe membership (which stage each trader reached)
+    - Thompson sampling draws with stored seeds for reproducibility
+    - FDR qualification status
+    - Death/censor event detection
+    """
+    # Wait for startup to complete
+    await asyncio.sleep(180)  # 3 minutes
+
+    print(f"[hl-sage] Starting daily snapshot job (hour: {SNAPSHOT_HOUR_UTC:02d}:00 UTC)")
+
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            target_hour = SNAPSHOT_HOUR_UTC
+
+            # Calculate seconds until next snapshot time
+            if now.hour < target_hour:
+                # Same day
+                next_run = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+            else:
+                # Next day
+                next_run = (now + timedelta(days=1)).replace(hour=target_hour, minute=0, second=0, microsecond=0)
+
+            wait_seconds = (next_run - now).total_seconds()
+
+            # Don't wait more than 1 hour at a time (allows for clock adjustments)
+            if wait_seconds > 3600:
+                print(f"[hl-sage] Next snapshot at {next_run.isoformat()}, waiting...")
+                await asyncio.sleep(3600)
+                continue
+
+            # Wait until snapshot time
+            if wait_seconds > 0:
+                print(f"[hl-sage] Snapshot due in {wait_seconds:.0f}s at {next_run.isoformat()}")
+                await asyncio.sleep(wait_seconds)
+
+            # Create snapshot
+            print(f"[hl-sage] Creating daily snapshot...")
+            result = await create_daily_snapshot(app.state.db)
+            print(f"[hl-sage] Snapshot complete: {result}")
+
+            # Wait a bit after snapshot to avoid running twice at boundary
+            await asyncio.sleep(60)
+
+        except Exception as e:
+            print(f"[hl-sage] Snapshot job error: {e}")
+            # Wait before retrying
+            await asyncio.sleep(300)
 
 
 @app.get("/healthz")
@@ -2196,3 +2296,476 @@ async def backfill_address_fills(address: str):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to backfill: {e}")
+
+
+@app.post("/alpha-pool/backfill-all")
+async def backfill_all_addresses(
+    delay_ms: int = Query(default=500, ge=100, le=5000, description="Delay between requests in milliseconds"),
+    active_only: bool = Query(default=True, description="Only backfill active addresses"),
+):
+    """
+    Backfill historical fills for ALL Alpha Pool addresses.
+
+    Use this after a fresh system rebuild to populate historical data.
+    Respects rate limits with configurable delay between requests.
+
+    Args:
+        delay_ms: Milliseconds to wait between API calls (default 500ms)
+        active_only: If true, only backfill active addresses (default true)
+
+    Returns:
+        Summary of backfill results for all addresses
+    """
+    import asyncio
+
+    # Get all addresses
+    async with app.state.db.acquire() as conn:
+        if active_only:
+            rows = await conn.fetch(
+                "SELECT address FROM alpha_pool_addresses WHERE is_active = true ORDER BY added_at"
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT address FROM alpha_pool_addresses ORDER BY added_at"
+            )
+
+    addresses = [row["address"] for row in rows]
+
+    if not addresses:
+        return {
+            "total_addresses": 0,
+            "total_fills": 0,
+            "message": "No addresses found in Alpha Pool",
+        }
+
+    # Backfill each address with delay
+    results = {}
+    total_fills = 0
+    errors = []
+
+    for i, addr in enumerate(addresses):
+        try:
+            print(f"[backfill-all] ({i+1}/{len(addresses)}) Backfilling {addr[:10]}...")
+            result = await backfill_historical_fills_for_addresses(app.state.db, [addr])
+            inserted = result.get(addr, 0)
+            results[addr] = inserted
+            total_fills += inserted
+
+            # Rate limit delay (except for last address)
+            if i < len(addresses) - 1:
+                await asyncio.sleep(delay_ms / 1000.0)
+
+        except Exception as e:
+            print(f"[backfill-all] Error backfilling {addr}: {e}")
+            errors.append({"address": addr, "error": str(e)})
+            results[addr] = 0
+
+    return {
+        "total_addresses": len(addresses),
+        "total_fills": total_fills,
+        "addresses_with_fills": sum(1 for v in results.values() if v > 0),
+        "addresses_with_no_fills": sum(1 for v in results.values() if v == 0),
+        "errors": len(errors),
+        "error_details": errors[:10] if errors else [],  # First 10 errors
+        "message": f"Backfilled {total_fills} fills across {len(addresses)} addresses",
+    }
+
+
+# =====================
+# Shadow Ledger API (Phase 3f: Selection Integrity)
+# =====================
+#
+# The Shadow Ledger captures daily snapshots of all traders for survivorship-bias-free
+# analysis. It enables:
+# - Walk-forward replay without look-ahead bias
+# - Survival analysis (who blew up and when)
+# - FDR-controlled skill qualification
+# - Thompson sampling with stored draws for reproducibility
+# =====================
+
+
+@app.post("/snapshots/create")
+async def create_snapshot(
+    snapshot_date: Optional[str] = Query(default=None, description="Date in YYYY-MM-DD format (default: today)"),
+):
+    """
+    Create a daily snapshot for the Shadow Ledger.
+
+    This captures the current state of all traders including:
+    - Universe membership (leaderboard_scanned, candidate_filtered, quality_qualified, pool_selected)
+    - NIG posteriors and Thompson sampling draws with stored seeds
+    - FDR qualification via Benjamini-Hochberg procedure
+    - Death/censor event detection
+
+    Normally runs automatically at SNAPSHOT_HOUR_UTC, but can be triggered manually.
+
+    Args:
+        snapshot_date: Optional date to create snapshot for (default: today).
+                      Useful for backfilling historical snapshots.
+    """
+    try:
+        from datetime import date as date_type
+
+        target_date = None
+        if snapshot_date:
+            try:
+                target_date = date_type.fromisoformat(snapshot_date)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid date format: {snapshot_date}. Use YYYY-MM-DD.")
+
+        result = await create_daily_snapshot(app.state.db, snapshot_date=target_date)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create snapshot: {e}")
+
+
+@app.get("/snapshots/summary")
+async def get_snapshots_summary(
+    snapshot_date: Optional[str] = Query(default=None, description="Date in YYYY-MM-DD format (default: today)"),
+):
+    """
+    Get summary statistics for a snapshot date.
+
+    Returns counts by universe membership and top selected traders.
+    """
+    try:
+        from datetime import date as date_type
+
+        target_date = None
+        if snapshot_date:
+            try:
+                target_date = date_type.fromisoformat(snapshot_date)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid date format: {snapshot_date}. Use YYYY-MM-DD.")
+
+        result = await get_snapshot_summary(app.state.db, snapshot_date=target_date)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get snapshot summary: {e}")
+
+
+@app.get("/snapshots/universe")
+async def get_universe_at_date(
+    evaluation_date: str = Query(..., description="Date in YYYY-MM-DD format"),
+    version: Optional[str] = Query(default=None, description="Selection version (default: current)"),
+):
+    """
+    Get the trader universe as-of a specific date.
+
+    CRITICAL: This uses the snapshot table, NOT current qualification.
+    This prevents look-ahead bias in walk-forward replay.
+
+    Returns the list of addresses that were in the universe on that date.
+    """
+    try:
+        from datetime import date as date_type
+
+        try:
+            target_date = date_type.fromisoformat(evaluation_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {evaluation_date}. Use YYYY-MM-DD.")
+
+        addresses = await load_universe_at_date(
+            app.state.db,
+            evaluation_date=target_date,
+            version=version or SELECTION_VERSION,
+        )
+
+        return {
+            "evaluation_date": target_date.isoformat(),
+            "version": version or SELECTION_VERSION,
+            "count": len(addresses),
+            "addresses": addresses,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get universe: {e}")
+
+
+@app.get("/snapshots/history")
+async def get_snapshot_history(
+    address: str = Query(..., description="Trader address"),
+    limit: int = Query(default=30, ge=1, le=365),
+):
+    """
+    Get snapshot history for a specific trader.
+
+    Returns the trader's snapshots over time, useful for:
+    - Analyzing performance trajectory
+    - Understanding universe membership changes
+    - Detecting death/censor events
+    """
+    try:
+        addr_lower = address.lower()
+        async with app.state.db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    snapshot_date,
+                    selection_version,
+                    is_leaderboard_scanned,
+                    is_candidate_filtered,
+                    is_quality_qualified,
+                    is_pool_selected,
+                    avg_r_gross,
+                    avg_r_net,
+                    nig_mu as nig_m,
+                    nig_kappa,
+                    thompson_draw,
+                    skill_p_value,
+                    fdr_qualified,
+                    event_type,
+                    death_type,
+                    censor_type,
+                    episode_count,
+                    selection_rank
+                FROM trader_snapshots
+                WHERE address = $1
+                ORDER BY snapshot_date DESC
+                LIMIT $2
+                """,
+                addr_lower,
+                limit,
+            )
+
+        return {
+            "address": addr_lower,
+            "count": len(rows),
+            "snapshots": [dict(row) for row in rows],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get snapshot history: {e}")
+
+
+@app.get("/snapshots/deaths")
+async def get_death_events(
+    days: int = Query(default=30, ge=1, le=365),
+    death_type: Optional[str] = Query(default=None, description="Filter by death type"),
+):
+    """
+    Get recent death events from the Shadow Ledger.
+
+    Death types (terminal events):
+    - liquidation: Account liquidated on Hyperliquid
+    - drawdown_80: Current equity < 20% of peak
+    - account_value_floor: Account dropped below $10k
+    - negative_equity: Account value <= 0
+
+    Useful for survival analysis and understanding trader lifecycle.
+    """
+    try:
+        from datetime import date as date_type
+
+        cutoff_date = date_type.today() - timedelta(days=days)
+
+        async with app.state.db.acquire() as conn:
+            if death_type:
+                rows = await conn.fetch(
+                    """
+                    SELECT
+                        address,
+                        snapshot_date,
+                        death_type,
+                        account_value,
+                        peak_account_value,
+                        avg_r_net,
+                        episode_count
+                    FROM trader_snapshots
+                    WHERE event_type = 'death'
+                      AND death_type = $1
+                      AND snapshot_date >= $2
+                    ORDER BY snapshot_date DESC
+                    """,
+                    death_type,
+                    cutoff_date,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT
+                        address,
+                        snapshot_date,
+                        death_type,
+                        account_value,
+                        peak_account_value,
+                        avg_r_net,
+                        episode_count
+                    FROM trader_snapshots
+                    WHERE event_type = 'death'
+                      AND snapshot_date >= $2
+                    ORDER BY snapshot_date DESC
+                    """,
+                    cutoff_date,
+                )
+
+        # Group by death type
+        by_type = {}
+        for row in rows:
+            dt = row["death_type"]
+            if dt not in by_type:
+                by_type[dt] = []
+            by_type[dt].append(dict(row))
+
+        return {
+            "period_days": days,
+            "total_deaths": len(rows),
+            "by_type": {k: len(v) for k, v in by_type.items()},
+            "events": [dict(row) for row in rows],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get death events: {e}")
+
+
+@app.get("/snapshots/config")
+async def get_snapshot_config():
+    """
+    Get current snapshot configuration.
+    """
+    from .snapshot import (
+        SNAPSHOT_FDR_ALPHA,
+        SNAPSHOT_MIN_EPISODES,
+        SNAPSHOT_MIN_AVG_R_NET,
+        DEATH_DRAWDOWN_PCT,
+        DEATH_ACCOUNT_FLOOR,
+        CENSOR_INACTIVE_DAYS,
+        ROUND_TRIP_COST_BPS,
+    )
+
+    return {
+        "enabled": SNAPSHOT_ENABLED,
+        "hour_utc": SNAPSHOT_HOUR_UTC,
+        "selection_version": SELECTION_VERSION,
+        "fdr_alpha": SNAPSHOT_FDR_ALPHA,
+        "min_episodes": SNAPSHOT_MIN_EPISODES,
+        "min_avg_r_net": SNAPSHOT_MIN_AVG_R_NET,
+        "round_trip_cost_bps": ROUND_TRIP_COST_BPS,
+        "death_thresholds": {
+            "drawdown_pct": DEATH_DRAWDOWN_PCT,
+            "account_floor": DEATH_ACCOUNT_FLOOR,
+        },
+        "censor_thresholds": {
+            "inactive_days": CENSOR_INACTIVE_DAYS,
+        },
+    }
+
+
+# =====================
+# Walk-Forward Replay API (Phase 3f)
+# =====================
+
+
+@app.post("/replay/run")
+async def run_replay(
+    start_date: str = Query(..., description="Start date in YYYY-MM-DD format"),
+    end_date: Optional[str] = Query(default=None, description="End date in YYYY-MM-DD (default: today)"),
+    evaluation_days: int = Query(default=REPLAY_EVALUATION_DAYS, ge=1, le=30),
+    version: Optional[str] = Query(default=None, description="Selection version (default: current)"),
+):
+    """
+    Run a walk-forward replay over a date range.
+
+    This provides an honest out-of-sample assessment:
+    - Selection uses only data available at selection_date (from snapshots)
+    - Performance measured on FUTURE data (not training data)
+    - Costs included in net returns
+
+    Process for each snapshot date:
+    1. Load traders selected on that date (from trader_snapshots)
+    2. Evaluate their performance over the next evaluation_days
+    3. Compute gross and net R-multiples (with costs)
+    4. Track deaths/censors
+
+    Args:
+        start_date: First selection date to replay
+        end_date: Last selection date to replay (default: today)
+        evaluation_days: Days to evaluate each selection (default: 7)
+        version: Selection version to replay (default: current)
+    """
+    try:
+        from datetime import date as date_type
+
+        try:
+            start = date_type.fromisoformat(start_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid start_date format: {start_date}")
+
+        if end_date:
+            try:
+                end = date_type.fromisoformat(end_date)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid end_date format: {end_date}")
+        else:
+            end = date_type.today()
+
+        if start > end:
+            raise HTTPException(status_code=400, detail="start_date must be before end_date")
+
+        summary = await run_walk_forward_replay(
+            app.state.db,
+            start_date=start,
+            end_date=end,
+            evaluation_days=evaluation_days,
+            version=version or SELECTION_VERSION,
+        )
+
+        return format_replay_summary(summary)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run replay: {e}")
+
+
+@app.get("/replay/period")
+async def replay_period(
+    selection_date: str = Query(..., description="Date in YYYY-MM-DD format"),
+    evaluation_days: int = Query(default=REPLAY_EVALUATION_DAYS, ge=1, le=30),
+    version: Optional[str] = Query(default=None, description="Selection version"),
+):
+    """
+    Replay a single selection period.
+
+    Returns detailed results for traders selected on the given date,
+    including their performance over the evaluation window.
+    """
+    try:
+        from datetime import date as date_type
+
+        try:
+            target_date = date_type.fromisoformat(selection_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {selection_date}")
+
+        result = await replay_single_period(
+            app.state.db,
+            selection_date=target_date,
+            evaluation_days=evaluation_days,
+            version=version or SELECTION_VERSION,
+        )
+
+        if not result:
+            raise HTTPException(status_code=404, detail=f"No snapshot data for {selection_date}")
+
+        return {
+            "selection_date": result.selection_date.isoformat(),
+            "evaluation_start": result.evaluation_start.isoformat(),
+            "evaluation_end": result.evaluation_end.isoformat(),
+            "universe_size": result.universe_size,
+            "selected_count": result.selected_count,
+            "fdr_qualified_count": result.fdr_qualified_count,
+            "total_r_gross": round(result.total_r_gross, 4),
+            "total_r_net": round(result.total_r_net, 4),
+            "avg_r_gross": round(result.avg_r_gross, 4),
+            "avg_r_net": round(result.avg_r_net, 4),
+            "deaths": result.deaths_during_period,
+            "censored": result.censored_during_period,
+            "traders": result.trader_results,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to replay period: {e}")

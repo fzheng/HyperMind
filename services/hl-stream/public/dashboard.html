@@ -87,6 +87,136 @@
 
       <!-- Tab Content: Alpha Pool -->
       <div class="tab-content active" id="tab-alpha-pool" data-testid="tab-content-alpha-pool">
+        <!-- Portfolio Overview -->
+        <section class="overview-section" data-testid="overview-section">
+          <div class="overview-grid" data-testid="overview-grid">
+            <!-- Equity Card -->
+            <div class="overview-card equity-card" data-testid="equity-card">
+              <div class="overview-card-header">
+                <span class="overview-icon">💰</span>
+                <span class="overview-title">Portfolio</span>
+              </div>
+              <div class="overview-card-body">
+                <div class="equity-main">
+                  <span class="equity-value" id="equity-value" data-testid="equity-value">—</span>
+                  <span class="equity-label">Total Equity</span>
+                </div>
+                <div class="equity-details">
+                  <div class="equity-detail">
+                    <span class="detail-label">Unrealized P&L</span>
+                    <span class="detail-value" id="unrealized-pnl" data-testid="unrealized-pnl">—</span>
+                  </div>
+                  <div class="equity-detail">
+                    <span class="detail-label">Exposure</span>
+                    <span class="detail-value" id="exposure-pct" data-testid="exposure-pct">—</span>
+                  </div>
+                  <div class="equity-detail">
+                    <span class="detail-label">Positions</span>
+                    <span class="detail-value" id="position-count" data-testid="position-count">—</span>
+                  </div>
+                </div>
+              </div>
+              <div class="overview-card-footer" id="portfolio-status" data-testid="portfolio-status">
+                <span class="status-text">Not configured</span>
+              </div>
+            </div>
+
+            <!-- Auto-Trade Status Card -->
+            <div class="overview-card autotrade-card" data-testid="autotrade-card">
+              <div class="overview-card-header">
+                <span class="overview-icon">🤖</span>
+                <span class="overview-title">Auto-Trade</span>
+                <span class="autotrade-toggle" id="autotrade-toggle" data-testid="autotrade-toggle">
+                  <span class="toggle-status" id="toggle-status">OFF</span>
+                </span>
+              </div>
+              <div class="overview-card-body">
+                <div class="autotrade-settings" id="autotrade-settings" data-testid="autotrade-settings">
+                  <div class="setting-row">
+                    <span class="setting-label">Exchange</span>
+                    <span class="setting-value">Hyperliquid</span>
+                  </div>
+                  <div class="setting-row">
+                    <span class="setting-label">Max Leverage</span>
+                    <span class="setting-value" id="max-leverage">—</span>
+                  </div>
+                  <div class="setting-row">
+                    <span class="setting-label">Max Position</span>
+                    <span class="setting-value" id="max-position">—</span>
+                  </div>
+                  <div class="setting-row">
+                    <span class="setting-label">Max Exposure</span>
+                    <span class="setting-value" id="max-exposure">—</span>
+                  </div>
+                </div>
+              </div>
+              <div class="overview-card-footer">
+                <span class="footer-hint">Configure in settings to enable</span>
+              </div>
+            </div>
+
+            <!-- Live Positions Card -->
+            <div class="overview-card positions-card" data-testid="positions-card">
+              <div class="overview-card-header">
+                <span class="overview-icon">📊</span>
+                <span class="overview-title">Live Positions</span>
+                <span class="positions-count" id="positions-count-badge" data-testid="positions-count-badge">0</span>
+              </div>
+              <div class="overview-card-body">
+                <div class="positions-table-container" id="positions-table-container" data-testid="positions-table-container">
+                  <table class="positions-table" data-testid="positions-table">
+                    <thead>
+                      <tr>
+                        <th>Symbol</th>
+                        <th>Side</th>
+                        <th>Size</th>
+                        <th>Entry</th>
+                        <th>Mark</th>
+                        <th>P&L</th>
+                      </tr>
+                    </thead>
+                    <tbody id="positions-tbody" data-testid="positions-tbody">
+                      <tr class="empty-row">
+                        <td colspan="6">No open positions</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Signal Performance Stats Bar -->
+        <section class="signal-stats-section" data-testid="signal-stats-section">
+          <div class="signal-stats-bar" data-testid="signal-stats-bar">
+            <div class="signal-stat" data-testid="stat-signals">
+              <span class="stat-value" id="stat-signals-value">—</span>
+              <span class="stat-label">Signals (7d)</span>
+            </div>
+            <div class="signal-stat" data-testid="stat-win-rate">
+              <span class="stat-value" id="stat-win-rate-value">—</span>
+              <span class="stat-label">Win Rate</span>
+            </div>
+            <div class="signal-stat" data-testid="stat-avg-r">
+              <span class="stat-value" id="stat-avg-r-value">—</span>
+              <span class="stat-label">Avg R</span>
+            </div>
+            <div class="signal-stat" data-testid="stat-total-r">
+              <span class="stat-value" id="stat-total-r-value">—</span>
+              <span class="stat-label">Total R</span>
+            </div>
+            <div class="signal-stat divider" data-testid="stat-skipped">
+              <span class="stat-value" id="stat-skipped-value">—</span>
+              <span class="stat-label">Skipped</span>
+            </div>
+            <div class="signal-stat" data-testid="stat-skip-rate">
+              <span class="stat-value" id="stat-skip-rate-value">—</span>
+              <span class="stat-label">Skip Rate</span>
+            </div>
+          </div>
+        </section>
+
         <!-- AI Trade Signals (consensus-based) -->
         <section class="ai-section" data-testid="ai-section">
           <div class="card ai-recommendations-card" data-testid="ai-signals-card">
@@ -118,6 +248,34 @@
                 </thead>
                 <tbody id="ai-recommendations-table" data-testid="ai-signals-tbody"></tbody>
               </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- Decision Log (audit trail) -->
+        <section class="decision-log-section" data-testid="decision-log-section">
+          <div class="card decision-log-card" data-testid="decision-log-card">
+            <div class="card-header">
+              <h3>
+                <span class="decision-icon">📋</span>
+                Decision Log
+                <span class="info-icon" title="Every consensus evaluation with reasoning. Shows why signals fired or were skipped.">?</span>
+              </h3>
+              <div class="card-actions">
+                <div class="decision-filter" data-testid="decision-filter">
+                  <button class="filter-btn active" data-filter="all" data-testid="filter-all">All</button>
+                  <button class="filter-btn" data-filter="signal" data-testid="filter-signal">Signals</button>
+                  <button class="filter-btn" data-filter="skip" data-testid="filter-skip">Skipped</button>
+                </div>
+              </div>
+            </div>
+            <div class="decision-log-container" data-testid="decision-log-container">
+              <div class="decision-list" id="decision-list" data-testid="decision-list">
+                <!-- Decision cards will be rendered here -->
+              </div>
+              <div class="decision-load-more" id="decision-load-more" data-testid="decision-load-more" style="display: none;">
+                <button class="load-more-btn" id="decision-load-more-btn">Load More</button>
+              </div>
             </div>
           </div>
         </section>

@@ -33,6 +33,8 @@ from fastapi import FastAPI
 from prometheus_client import Counter, Histogram, generate_latest, CollectorRegistry, CONTENT_TYPE_LATEST
 from starlette.responses import Response
 
+from pydantic import BaseModel
+
 from contracts.py.models import FillEvent, ScoreEvent
 from .consensus import ConsensusDetector, Fill, ConsensusSignal
 from .episode import EpisodeTracker, EpisodeFill, Episode, EpisodeBuilderConfig
@@ -43,6 +45,29 @@ from .correlation import (
     CorrelationProvider,
     run_daily_correlation_job,
 )
+from .decision_logger import (
+    log_decision,
+    get_decisions,
+    get_decision,
+    get_decision_stats,
+    GateResult,
+)
+from .portfolio import (
+    get_portfolio_summary,
+    get_execution_config,
+    update_execution_config,
+    get_execution_logs,
+)
+
+
+class ExecutionConfigUpdate(BaseModel):
+    """Request body for updating execution config."""
+    enabled: Optional[bool] = None
+    hl_enabled: Optional[bool] = None
+    hl_address: Optional[str] = None
+    hl_max_leverage: Optional[int] = None
+    hl_max_position_pct: Optional[float] = None
+    hl_max_exposure_pct: Optional[float] = None
 
 SERVICE_NAME = "hl-decide"
 NATS_URL = os.getenv("NATS_URL", "nats://0.0.0.0:4222")
@@ -1420,7 +1445,7 @@ async def process_fill_for_consensus_via_episodes(data: FillEvent, closed_episod
 
         # Check for consensus based on episode positions
         if len(episode_fills) >= 3:  # Minimum traders for consensus
-            signal = check_episode_consensus(data.asset, episode_fills)
+            signal = await check_episode_consensus(data.asset, episode_fills)
             if signal:
                 await handle_consensus_signal(signal)
 
@@ -1428,7 +1453,7 @@ async def process_fill_for_consensus_via_episodes(data: FillEvent, closed_episod
         print(f"[hl-decide] Episode consensus processing error: {e}")
 
 
-def check_episode_consensus(asset: str, episode_fills: list) -> Optional[ConsensusSignal]:
+async def check_episode_consensus(asset: str, episode_fills: list) -> Optional[ConsensusSignal]:
     """
     Check for consensus among episode-based votes.
 
@@ -1438,6 +1463,8 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
     Uses centralized functions from consensus.py to avoid logic drift:
     - calculate_vote_weight() for vote weighting (log/equity modes)
     - ConsensusDetector.passes_latency_and_price_gates() for ATR-based R-unit drift check
+
+    Now logs all decisions (signal, skip, risk_reject) for auditability.
 
     Args:
         asset: The asset to check consensus for
@@ -1451,10 +1478,35 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
         ConsensusWindow, Vote,
         CONSENSUS_MIN_TRADERS, CONSENSUS_MIN_AGREEING, CONSENSUS_MIN_PCT,
         CONSENSUS_MIN_EFFECTIVE_K, CONSENSUS_EV_MIN_R, CONSENSUS_BASE_WINDOW_S,
+        CONSENSUS_MAX_STALENESS_FACTOR, CONSENSUS_MAX_PRICE_DRIFT_R,
     )
     import statistics
 
-    if len(episode_fills) < CONSENSUS_MIN_TRADERS:
+    # Track gate results for decision logging
+    gate_results: list[GateResult] = []
+
+    # Gate 0: Minimum traders check
+    min_traders_passed = len(episode_fills) >= CONSENSUS_MIN_TRADERS
+    gate_results.append(GateResult(
+        name="min_traders",
+        passed=min_traders_passed,
+        value=float(len(episode_fills)),
+        threshold=float(CONSENSUS_MIN_TRADERS),
+    ))
+
+    if not min_traders_passed:
+        # Not enough traders - log skip decision
+        await log_decision(
+            db=app.state.db,
+            symbol=asset,
+            direction="none",
+            decision_type="skip",
+            trader_count=len(episode_fills),
+            agreement_pct=0.0,
+            effective_k=0.0,
+            gates=gate_results,
+            price=consensus_detector.get_current_mid(asset),
+        )
         return None
 
     # One vote per trader (already deduplicated by episode)
@@ -1479,13 +1531,38 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
 
     directions = [v.direction for v in votes]
 
+    # Calculate agreement for logging
+    long_count = sum(1 for d in directions if d == "long")
+    short_count = len(directions) - long_count
+    majority_count = max(long_count, short_count)
+    agreement_pct = majority_count / len(directions) if directions else 0.0
+    majority_dir = "long" if long_count >= short_count else "short"
+
     # Gate 1: Dispersion (supermajority)
-    passes, majority_dir = passes_consensus_gates(
+    passes, _ = passes_consensus_gates(
         directions,
         min_agreeing=CONSENSUS_MIN_AGREEING,
         min_pct=CONSENSUS_MIN_PCT,
     )
+    gate_results.append(GateResult(
+        name="supermajority",
+        passed=passes,
+        value=agreement_pct,
+        threshold=CONSENSUS_MIN_PCT,
+    ))
+
     if not passes:
+        await log_decision(
+            db=app.state.db,
+            symbol=asset,
+            direction=majority_dir,
+            decision_type="skip",
+            trader_count=len(votes),
+            agreement_pct=agreement_pct,
+            effective_k=0.0,
+            gates=gate_results,
+            price=consensus_detector.get_current_mid(asset),
+        )
         return None
 
     # Get agreeing votes
@@ -1502,7 +1579,26 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
     effk_value_histogram.observe(eff_k)
     update_weight_metrics(list(weights.values()), asset=asset)
 
-    if eff_k < CONSENSUS_MIN_EFFECTIVE_K:
+    effk_passed = eff_k >= CONSENSUS_MIN_EFFECTIVE_K
+    gate_results.append(GateResult(
+        name="effective_k",
+        passed=effk_passed,
+        value=eff_k,
+        threshold=CONSENSUS_MIN_EFFECTIVE_K,
+    ))
+
+    if not effk_passed:
+        await log_decision(
+            db=app.state.db,
+            symbol=asset,
+            direction=majority_dir,
+            decision_type="skip",
+            trader_count=len(votes),
+            agreement_pct=agreement_pct,
+            effective_k=eff_k,
+            gates=gate_results,
+            price=consensus_detector.get_current_mid(asset),
+        )
         return None
 
     # Calculate entry price (median of agreeing voters)
@@ -1517,17 +1613,87 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
     else:
         stop_price = median_entry + stop_distance
 
-    # Gate 3: Latency + Price band check using centralized ATR-based R-unit logic
-    # Create a temporary window for the gate check
-    oldest_ts = min(v.ts for v in agreeing_votes)
-    temp_window = ConsensusWindow(
-        symbol=asset,
-        window_start=oldest_ts,
-        window_s=CONSENSUS_BASE_WINDOW_S,
-        fills=[],  # Fills not needed for latency/price gate check
-    )
+    # Gate 3a: ATR validity check
+    is_atr_valid, atr_reason = consensus_detector.is_atr_valid_for_gating(asset)
+    gate_results.append(GateResult(
+        name="atr_validity",
+        passed=is_atr_valid,
+        value=1.0 if is_atr_valid else 0.0,
+        threshold=1.0,
+        detail=atr_reason,
+    ))
 
-    if not consensus_detector.passes_latency_and_price_gates(temp_window, agreeing_votes):
+    if not is_atr_valid:
+        await log_decision(
+            db=app.state.db,
+            symbol=asset,
+            direction=majority_dir,
+            decision_type="skip",
+            trader_count=len(votes),
+            agreement_pct=agreement_pct,
+            effective_k=eff_k,
+            gates=gate_results,
+            price=mid_price,
+        )
+        return None
+
+    # Gate 3b: Latency check
+    oldest_ts = min(v.ts for v in agreeing_votes)
+    now = datetime.now(timezone.utc)
+    staleness_s = (now - oldest_ts).total_seconds()
+    max_staleness = CONSENSUS_BASE_WINDOW_S * CONSENSUS_MAX_STALENESS_FACTOR
+    latency_passed = staleness_s <= max_staleness
+
+    gate_results.append(GateResult(
+        name="freshness",
+        passed=latency_passed,
+        value=staleness_s,
+        threshold=max_staleness,
+    ))
+
+    if not latency_passed:
+        await log_decision(
+            db=app.state.db,
+            symbol=asset,
+            direction=majority_dir,
+            decision_type="skip",
+            trader_count=len(votes),
+            agreement_pct=agreement_pct,
+            effective_k=eff_k,
+            gates=gate_results,
+            price=mid_price,
+        )
+        return None
+
+    # Gate 3c: Price band check (ATR-based R-units)
+    if median_entry > 0 and mid_price > 0:
+        bps_deviation = abs(mid_price - median_entry) / median_entry * 10000
+        stop_bps = stop_fraction * 10000
+        deviation_r = bps_deviation / stop_bps if stop_bps > 0 else 0
+        price_band_passed = deviation_r <= CONSENSUS_MAX_PRICE_DRIFT_R
+    else:
+        deviation_r = 0
+        price_band_passed = False
+
+    gate_results.append(GateResult(
+        name="price_band",
+        passed=price_band_passed,
+        value=deviation_r,
+        threshold=CONSENSUS_MAX_PRICE_DRIFT_R,
+    ))
+
+    if not price_band_passed:
+        await log_decision(
+            db=app.state.db,
+            symbol=asset,
+            direction=majority_dir,
+            decision_type="skip",
+            trader_count=len(votes),
+            agreement_pct=agreement_pct,
+            effective_k=eff_k,
+            gates=gate_results,
+            price=mid_price,
+        )
         return None
 
     # Gate 4: EV after costs
@@ -1538,11 +1704,31 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
         stop_px=stop_price,
     )
 
-    if ev_result["ev_net_r"] < CONSENSUS_EV_MIN_R:
+    ev_passed = ev_result["ev_net_r"] >= CONSENSUS_EV_MIN_R
+    gate_results.append(GateResult(
+        name="ev_gate",
+        passed=ev_passed,
+        value=ev_result["ev_net_r"],
+        threshold=CONSENSUS_EV_MIN_R,
+    ))
+
+    if not ev_passed:
+        await log_decision(
+            db=app.state.db,
+            symbol=asset,
+            direction=majority_dir,
+            decision_type="skip",
+            trader_count=len(votes),
+            agreement_pct=agreement_pct,
+            effective_k=eff_k,
+            gates=gate_results,
+            price=mid_price,
+            confidence=p_win,
+            ev=ev_result["ev_net_r"],
+        )
         return None
 
-    # All gates passed! Create signal
-    now = datetime.now(timezone.utc)
+    # All consensus gates passed! Create signal
     latency_ms = int((now - oldest_ts).total_seconds() * 1000)
     mid_delta_bps = abs(mid_price - median_entry) / median_entry * 10000 if median_entry > 0 else 0
 
@@ -1574,13 +1760,62 @@ def check_episode_consensus(asset: str, episode_fills: list) -> Optional[Consens
     # Gate 5: Risk limits fail-safe
     from .consensus import check_risk_limits
     passes_risk, risk_reason = check_risk_limits(signal)
+
+    gate_results.append(GateResult(
+        name="risk_limits",
+        passed=passes_risk,
+        value=p_win if not passes_risk else 1.0,
+        threshold=1.0,
+        detail=risk_reason if not passes_risk else "",
+    ))
+
     if not passes_risk:
         signal_risk_rejected_counter.labels(reason=risk_reason.split()[0]).inc()
         print(f"[consensus] Signal rejected by risk limits: {risk_reason}")
+
+        # Log as risk_reject
+        await log_decision(
+            db=app.state.db,
+            symbol=asset,
+            direction=majority_dir,
+            decision_type="risk_reject",
+            trader_count=len(votes),
+            agreement_pct=agreement_pct,
+            effective_k=eff_k,
+            gates=gate_results,
+            risk_checks=[{"name": "risk_limits", "passed": False, "reason": risk_reason}],
+            price=mid_price,
+            confidence=p_win,
+            ev=ev_result["ev_net_r"],
+        )
         return None
 
-    # All gates passed including risk limits
+    # All gates passed including risk limits - log as signal
     signal_generated_counter.labels(symbol=asset, direction=majority_dir).inc()
+
+    decision_id = await log_decision(
+        db=app.state.db,
+        symbol=asset,
+        direction=majority_dir,
+        decision_type="signal",
+        trader_count=len(votes),
+        agreement_pct=agreement_pct,
+        effective_k=eff_k,
+        gates=gate_results,
+        price=mid_price,
+        confidence=p_win,
+        ev=ev_result["ev_net_r"],
+    )
+
+    # Attempt execution if auto-trading is enabled
+    from .executor import maybe_execute_signal
+    await maybe_execute_signal(
+        db=app.state.db,
+        decision_id=decision_id,
+        symbol=asset,
+        direction=majority_dir,
+    )
+
     return signal
 
 
@@ -2072,3 +2307,187 @@ async def get_correlation_status():
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+# =====================
+# Decision Logging API
+# =====================
+
+
+@app.get("/decisions")
+async def list_decisions(
+    symbol: Optional[str] = None,
+    decision_type: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """
+    List decision logs with optional filters.
+
+    Args:
+        symbol: Filter by symbol (BTC, ETH)
+        decision_type: Filter by type (signal, skip, risk_reject)
+        limit: Max results (default 50)
+        offset: Pagination offset
+
+    Returns:
+        Paginated list of decisions with reasoning
+    """
+    return await get_decisions(
+        db=app.state.db,
+        symbol=symbol,
+        decision_type=decision_type,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/decisions/stats")
+async def decision_stats(days: int = 7):
+    """
+    Get aggregate statistics for decisions.
+
+    Args:
+        days: Number of days to look back (default 7)
+
+    Returns:
+        Aggregate stats including signal count, skip rate, win rate
+    """
+    return await get_decision_stats(db=app.state.db, days=days)
+
+
+@app.get("/decisions/{decision_id}")
+async def get_decision_by_id(decision_id: str):
+    """
+    Get full details for a single decision.
+
+    Args:
+        decision_id: The decision log UUID
+
+    Returns:
+        Full decision details including gates, reasoning, and outcome
+    """
+    result = await get_decision(db=app.state.db, decision_id=decision_id)
+    if result is None:
+        return {"error": "Decision not found"}
+    return result
+
+
+# =====================
+# Portfolio & Execution API
+# =====================
+
+
+@app.get("/portfolio")
+async def portfolio_summary(address: Optional[str] = None):
+    """
+    Get portfolio summary including account value and positions.
+
+    Currently supports Hyperliquid only. Multi-exchange in Phase 4.
+
+    Args:
+        address: Optional Hyperliquid address (falls back to config)
+
+    Returns:
+        Portfolio summary with equity, positions, and P&L
+    """
+    return await get_portfolio_summary(db=app.state.db, address=address)
+
+
+@app.get("/portfolio/positions")
+async def list_positions():
+    """
+    Get live positions from database.
+
+    Returns cached positions from last portfolio sync.
+    """
+    try:
+        async with app.state.db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT exchange, symbol, side, size, entry_price, mark_price,
+                       liquidation_price, unrealized_pnl, margin_used, leverage,
+                       opened_at, updated_at
+                FROM live_positions
+                ORDER BY updated_at DESC
+                """
+            )
+            return {
+                "count": len(rows),
+                "positions": [
+                    {
+                        "exchange": row["exchange"],
+                        "symbol": row["symbol"],
+                        "side": row["side"],
+                        "size": float(row["size"]),
+                        "entry_price": float(row["entry_price"]),
+                        "mark_price": float(row["mark_price"]) if row["mark_price"] else None,
+                        "liquidation_price": float(row["liquidation_price"]) if row["liquidation_price"] else None,
+                        "unrealized_pnl": float(row["unrealized_pnl"]) if row["unrealized_pnl"] else None,
+                        "margin_used": float(row["margin_used"]) if row["margin_used"] else None,
+                        "leverage": row["leverage"],
+                        "opened_at": row["opened_at"].isoformat() if row["opened_at"] else None,
+                        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+                    }
+                    for row in rows
+                ],
+            }
+    except Exception as e:
+        return {"error": str(e), "count": 0, "positions": []}
+
+
+@app.get("/execution/config")
+async def execution_config():
+    """
+    Get current execution configuration.
+
+    Returns auto-trade settings and risk limits.
+    """
+    return await get_execution_config(db=app.state.db)
+
+
+@app.post("/execution/config")
+async def update_config(config: ExecutionConfigUpdate):
+    """
+    Update execution configuration.
+
+    Requires owner authentication.
+
+    Args:
+        config: ExecutionConfigUpdate JSON body containing any of:
+            - enabled: Master enable/disable for auto-trading
+            - hl_enabled: Enable Hyperliquid auto-trading
+            - hl_address: Hyperliquid wallet address
+            - hl_max_leverage: Maximum leverage (1-10)
+            - hl_max_position_pct: Max position size as % of equity (0-100)
+            - hl_max_exposure_pct: Max total exposure as % of equity (0-100)
+
+    Returns:
+        Updated config
+    """
+    return await update_execution_config(
+        db=app.state.db,
+        enabled=config.enabled,
+        hl_enabled=config.hl_enabled,
+        hl_address=config.hl_address,
+        hl_max_leverage=config.hl_max_leverage,
+        hl_max_position_pct=config.hl_max_position_pct,
+        hl_max_exposure_pct=config.hl_max_exposure_pct,
+    )
+
+
+@app.get("/execution/logs")
+async def execution_logs(limit: int = 50, offset: int = 0):
+    """
+    Get recent execution logs.
+
+    Shows all trade execution attempts with results.
+
+    Args:
+        limit: Max results (default 50)
+        offset: Pagination offset
+
+    Returns:
+        Paginated execution logs
+    """
+    return await get_execution_logs(db=app.state.db, limit=limit, offset=offset)

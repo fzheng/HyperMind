@@ -2852,3 +2852,696 @@ td {
     font-size: 12px;
   }
 }
+
+/* ==================== SIGNAL PERFORMANCE STATS BAR ==================== */
+.signal-stats-section {
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.signal-stats-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.signal-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 16px;
+  min-width: 80px;
+  flex: 1;
+}
+
+.signal-stat.divider {
+  border-left: 1px solid var(--border-secondary);
+  margin-left: 8px;
+  padding-left: 24px;
+}
+
+.signal-stat .stat-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.signal-stat .stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 4px;
+}
+
+/* Color coding for stats */
+.signal-stat .stat-value.positive {
+  color: var(--positive);
+}
+
+.signal-stat .stat-value.negative {
+  color: var(--negative);
+}
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+  .signal-stats-bar {
+    gap: 4px;
+    padding: 8px 12px;
+  }
+
+  .signal-stat {
+    padding: 6px 8px;
+    min-width: 60px;
+  }
+
+  .signal-stat.divider {
+    margin-left: 4px;
+    padding-left: 12px;
+  }
+
+  .signal-stat .stat-value {
+    font-size: 16px;
+  }
+
+  .signal-stat .stat-label {
+    font-size: 10px;
+  }
+}
+
+/* ==================== DECISION LOG ==================== */
+.decision-log-section {
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.decision-log-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.decision-icon {
+  margin-right: 4px;
+}
+
+.decision-filter {
+  display: flex;
+  gap: 4px;
+}
+
+.decision-filter .filter-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.decision-filter .filter-btn:hover {
+  border-color: var(--border-hover);
+  color: var(--text-secondary);
+}
+
+.decision-filter .filter-btn.active {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: white;
+}
+
+.decision-log-container {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.decision-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.decision-card {
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.decision-card:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-hover);
+}
+
+.decision-card.type-signal {
+  border-left: 3px solid var(--positive);
+}
+
+.decision-card.type-skip {
+  border-left: 3px solid var(--text-muted);
+}
+
+.decision-card.type-risk_reject {
+  border-left: 3px solid var(--negative);
+}
+
+.decision-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.decision-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.decision-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-radius: 3px;
+}
+
+.decision-type-badge.signal {
+  background: var(--positive-bg);
+  color: var(--positive);
+  border: 1px solid var(--positive-border);
+}
+
+.decision-type-badge.skip {
+  background: var(--bg-card-hover);
+  color: var(--text-muted);
+  border: 1px solid var(--border-secondary);
+}
+
+.decision-type-badge.risk_reject {
+  background: var(--negative-bg);
+  color: var(--negative);
+  border: 1px solid var(--negative-border);
+}
+
+.decision-symbol {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.decision-direction {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.decision-direction.long {
+  color: var(--positive);
+}
+
+.decision-direction.short {
+  color: var(--negative);
+}
+
+.decision-time {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.decision-reasoning {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.decision-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.decision-metric {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.decision-metric .metric-label {
+  opacity: 0.7;
+}
+
+.decision-metric .metric-value {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.decision-gates {
+  display: none;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-primary);
+}
+
+.decision-card.expanded .decision-gates {
+  display: block;
+}
+
+.gate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gate-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 8px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+}
+
+.gate-status {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+}
+
+.gate-status.passed {
+  background: var(--positive-bg);
+  color: var(--positive);
+}
+
+.gate-status.failed {
+  background: var(--negative-bg);
+  color: var(--negative);
+}
+
+.gate-name {
+  font-weight: 500;
+  min-width: 100px;
+}
+
+.gate-value {
+  color: var(--text-secondary);
+}
+
+.decision-load-more {
+  padding: 12px;
+  text-align: center;
+}
+
+.decision-load-more .load-more-btn {
+  padding: 8px 24px;
+  font-size: 13px;
+  background: transparent;
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.decision-load-more .load-more-btn:hover {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.decision-empty {
+  padding: 32px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+  .decision-log-container {
+    max-height: 300px;
+  }
+
+  .decision-card {
+    padding: 10px 12px;
+  }
+
+  .decision-header {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .decision-metrics {
+    gap: 8px;
+  }
+
+  .decision-filter .filter-btn {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+}
+
+/* ==================== PORTFOLIO OVERVIEW ==================== */
+.overview-section {
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.overview-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.overview-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+}
+
+.overview-icon {
+  font-size: 16px;
+}
+
+.overview-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+  flex: 1;
+}
+
+.overview-card-body {
+  padding: 16px;
+  flex: 1;
+}
+
+.overview-card-footer {
+  padding: 8px 16px;
+  border-top: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Equity Card */
+.equity-main {
+  text-align: center;
+  margin-bottom: 16px;
+}
+
+.equity-value {
+  display: block;
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.equity-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.equity-details {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.equity-detail {
+  flex: 1;
+  text-align: center;
+  padding: 8px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+}
+
+.equity-detail .detail-label {
+  display: block;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 4px;
+}
+
+.equity-detail .detail-value {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.equity-detail .detail-value.positive {
+  color: var(--positive);
+}
+
+.equity-detail .detail-value.negative {
+  color: var(--negative);
+}
+
+/* Auto-Trade Card */
+.autotrade-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.toggle-status {
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  border: 1px solid var(--border-secondary);
+}
+
+.toggle-status.on,
+.toggle-status.enabled {
+  background: var(--positive-bg);
+  color: var(--positive);
+  border-color: var(--positive-border);
+}
+
+.toggle-status.off {
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  border-color: var(--border-secondary);
+}
+
+.autotrade-toggle {
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.autotrade-toggle:hover {
+  opacity: 0.8;
+}
+
+/* Portfolio status footer */
+.overview-card-footer .status-text {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.overview-card-footer .status-text.connected {
+  color: var(--positive);
+}
+
+.overview-card-footer .status-text.error {
+  color: var(--negative);
+}
+
+/* Detail value states */
+.detail-value.warning {
+  color: var(--warning-color, #f59e0b);
+}
+
+.autotrade-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.setting-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.setting-row:last-child {
+  border-bottom: none;
+}
+
+.setting-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.setting-value {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.footer-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Positions Card */
+.positions-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--accent-primary);
+  color: white;
+  border-radius: 10px;
+}
+
+.positions-count.empty {
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+}
+
+.positions-table-container {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.positions-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.positions-table th {
+  text-align: left;
+  padding: 6px 8px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.3px;
+  border-bottom: 1px solid var(--border-primary);
+  position: sticky;
+  top: 0;
+  background: var(--bg-card);
+}
+
+.positions-table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+}
+
+.positions-table tr:last-child td {
+  border-bottom: none;
+}
+
+.positions-table .empty-row td {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 24px;
+}
+
+.positions-table .side-cell.positive,
+.positions-table .side-long {
+  color: var(--positive);
+  font-weight: 500;
+}
+
+.positions-table .side-cell.negative,
+.positions-table .side-short {
+  color: var(--negative);
+  font-weight: 500;
+}
+
+.positions-table .pnl-cell.positive,
+.positions-table .pnl-positive {
+  color: var(--positive);
+  font-weight: 500;
+}
+
+.positions-table .pnl-cell.negative,
+.positions-table .pnl-negative {
+  color: var(--negative);
+  font-weight: 500;
+}
+
+.positions-table .symbol-cell {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+/* Responsive */
+@media (max-width: 1024px) {
+  .overview-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .overview-card.positions-card {
+    grid-column: span 2;
+  }
+}
+
+@media (max-width: 768px) {
+  .overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .overview-card.positions-card {
+    grid-column: span 1;
+  }
+
+  .equity-value {
+    font-size: 24px;
+  }
+
+  .equity-details {
+    flex-direction: column;
+    gap: 8px;
+  }
+}

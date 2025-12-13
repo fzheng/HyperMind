@@ -16,10 +16,12 @@ A collective intelligence trading system that learns from top Hyperliquid trader
 | 3a | Alpha Pool UI & Runtime Wiring | ✅ Complete |
 | 3b | Core Algorithm (Thompson Sampling, ATR, Correlation) | ✅ Complete |
 | 3c | Observability & Hardening | ✅ Complete |
-| **4** | **Risk Management (Kelly criterion)** | 🔲 **Next** |
+| 3d | Fill Sync & Auto-Refresh | ✅ Complete |
+| 3e | Decision Logging & Execution Foundation | ✅ Complete |
+| 3f | Selection Integrity (Shadow Ledger, FDR, Walk-Forward) | ✅ Complete |
+| **4** | **Risk Management (Kelly criterion)** | 🔄 **Next** |
 | 5 | Market Regime Detection | 🔲 Planned |
-| 6 | Hyperliquid Read-Only Integration | 🔲 Planned |
-| 7 | Automated Execution | 🔲 Planned |
+| 6 | Multi-Exchange Integration | 🔲 Planned |
 
 ---
 
@@ -42,9 +44,9 @@ Leaderboard → Quality Filter → Alpha Pool → Thompson Sampling → Consensu
 | hl-decide | 4104 | Consensus detection, episode tracking |
 
 **Test Coverage:**
-- TypeScript: 973 unit tests
-- Python: 164 tests (151 + 13 risk limits)
-- E2E: 110 Playwright tests (6 spec files)
+- TypeScript: 1,035 unit tests (28 test suites)
+- Python: 391 tests (150 hl-sage + 241 hl-decide)
+- E2E: 220 Playwright tests (6 spec files)
 
 ### Phase 3c Additions (December 2025)
 
@@ -93,6 +95,34 @@ Leaderboard → Quality Filter → Alpha Pool → Thompson Sampling → Consensu
 - Manual backfill endpoint: `POST /alpha-pool/backfill/{address}`
 - Backfill fetches fills from Hyperliquid API and stores in `hl_events`
 - Only genuinely new addresses are backfilled (not re-activated addresses)
+
+**Decision Logging & Dashboard (Phase 3e):**
+- All consensus gate decisions logged to `decision_logs` table
+- Signal history with outcome tracking in dashboard
+- Stats bar showing win rate, EV, and signal counts
+- Decision types: `signal`, `rejected`, `cooldown`, `risk_rejected`
+
+**Portfolio & Execution Foundation (Phase 3e):**
+- Portfolio API fetches real-time account state from Hyperliquid
+- `portfolio_snapshots` table tracks equity over time
+- `live_positions` table tracks current open positions
+- `execution_config` table for auto-trading settings (disabled by default)
+- `execution_logs` table tracks execution attempts and outcomes
+
+**HyperliquidExecutor (Phase 3e):**
+- Dry-run execution for Phase 3 (simulation mode)
+- Validates risk limits before execution:
+  - Max position size (default 2%)
+  - Max total exposure (default 10%)
+  - Account value verification
+- Logs all execution attempts with full context
+- Ready for real execution in Phase 4 (requires private key)
+
+**Dashboard Overview Tab (Phase 3e):**
+- Portfolio summary with account value and exposure
+- Live positions display with P&L
+- Execution logs viewer
+- Execution config panel (view-only in Phase 3)
 
 ---
 
@@ -162,10 +192,224 @@ npm run test:coverage
 
 ---
 
-## Phase 4: Risk Management (Next)
+## Phase 3f: Selection Integrity (In Progress)
 
 ### Goal
-Implement Kelly criterion position sizing with practical guardrails.
+Eliminate survivorship bias and ensure statistically valid trader selection through:
+1. **Shadow Ledger**: Track all traders who ever appeared (including those who "blew up")
+2. **Walk-Forward Validation**: Replay selection with as-of data, no look-ahead
+3. **FDR Control**: Reduce false positive rate in trader selection
+4. **Risk Governor**: Hard caps before any live trading
+
+### Why This Matters
+Current selection suffers from:
+- **Survivorship bias**: Only see traders who haven't blown up yet
+- **Look-ahead bias**: Selection may use future information
+- **Multiple testing**: Testing many traders inflates false positives
+- **No statistical significance**: No proof traders have real skill vs luck
+
+### Shadow Ledger Schema
+
+```sql
+CREATE TABLE trader_snapshots (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    snapshot_date DATE NOT NULL,
+    address TEXT NOT NULL,
+
+    -- Versioning
+    selection_version TEXT NOT NULL,  -- e.g., "3f.1"
+
+    -- Multi-universe membership (boolean flags)
+    is_leaderboard_scanned BOOLEAN DEFAULT FALSE,
+    is_candidate_filtered BOOLEAN DEFAULT FALSE,
+    is_quality_qualified BOOLEAN DEFAULT FALSE,
+    is_pool_selected BOOLEAN DEFAULT FALSE,
+    is_pinned_custom BOOLEAN DEFAULT FALSE,
+
+    -- As-of features
+    account_value NUMERIC,
+    pnl_30d NUMERIC,
+    roi_30d NUMERIC,
+    win_rate NUMERIC,
+    episode_count INTEGER,
+    week_volume NUMERIC,
+    orders_per_day NUMERIC,
+
+    -- R-multiple stats (gross vs net)
+    avg_r_gross NUMERIC,
+    avg_r_net NUMERIC,
+
+    -- NIG posterior params
+    nig_mu NUMERIC,
+    nig_kappa NUMERIC,
+    nig_alpha NUMERIC,
+    nig_beta NUMERIC,
+
+    -- Thompson sampling (stored for reproducibility)
+    thompson_draw NUMERIC,
+    thompson_seed BIGINT,
+    selection_rank INTEGER,
+
+    -- Lifecycle events
+    event_type TEXT,  -- entered, active, promoted, demoted, death, censored
+    death_type TEXT,  -- liquidation, drawdown_80, account_value_floor
+    censor_type TEXT, -- inactive_30d, stopped_btc_eth, api_unavailable
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(snapshot_date, address, selection_version)
+);
+```
+
+### Selection Definition (10 Gates)
+
+| Gate | Criteria | Config |
+|------|----------|--------|
+| 1 | Min 30d PnL | `ALPHA_POOL_MIN_PNL=10000` |
+| 2 | Min 30d ROI | `ALPHA_POOL_MIN_ROI=0.10` |
+| 3 | Min Account Value | `ALPHA_POOL_MIN_ACCOUNT_VALUE=100000` |
+| 4 | Weekly Activity | `ALPHA_POOL_MIN_WEEK_VLM=10000` |
+| 5 | HFT Filter | `ALPHA_POOL_MAX_ORDERS_PER_DAY=100` |
+| 6 | No Subaccounts | Checked during filtering |
+| 7 | BTC/ETH History | Must have traded BTC or ETH |
+| 8 | Min Episodes | `episode_count >= 30` |
+| 9 | FDR-Qualified | Benjamini-Hochberg at α=0.10 |
+| 10 | Effect Size | `avg_r_net >= 0.05` |
+
+### Death vs Censor Events
+
+**Death (Terminal)** - Trader permanently excluded:
+| Type | Trigger |
+|------|---------|
+| `liquidation` | Account liquidated on Hyperliquid |
+| `drawdown_80` | Current equity < 20% of peak |
+| `account_value_floor` | Account < $10k |
+| `negative_equity` | Account value <= 0 |
+
+**Censored (Non-Terminal)** - Disappeared but not dead:
+| Type | Trigger |
+|------|---------|
+| `inactive_30d` | No fills for 30 days |
+| `stopped_btc_eth` | Only trading other assets |
+| `api_unavailable` | HL API returns no data |
+
+### Tasks
+
+#### 3f.1 Shadow Ledger ✅
+- [x] Design schema with Advisor A feedback
+- [x] Create migration for `trader_snapshots` table
+- [x] Implement daily snapshot job in hl-sage
+- [x] Store Thompson draws for reproducibility
+- [x] Track death/censor events
+- [x] Add API endpoints (`/snapshots/*`)
+- [x] Add unit tests (31 tests passing)
+
+#### 3f.2 FDR Qualification ✅
+- [x] Implement Benjamini-Hochberg procedure (correct k* finding)
+- [x] Winsorize R-values before t-test
+- [x] Store gross/net R-multiples separately
+- [x] Effect size gate (avg_r_net >= 0.05)
+- [x] Skill p-value computation via one-sided t-test
+
+#### 3f.3 Walk-Forward Replay ✅
+- [x] Snapshot-based universe freeze (no look-ahead)
+- [x] Single-period replay skeleton
+- [x] Cost estimation in replay (30bps round-trip)
+- [x] Summary metrics output (Sharpe, win rate, survival)
+- [x] API endpoints (`/replay/run`, `/replay/period`)
+- [x] Unit tests (13 tests passing)
+
+#### 3f.4 Risk Governor ✅
+- [x] Liquidation distance guard (margin ratio < 1.5x)
+- [x] Daily drawdown kill switch (5% threshold)
+- [x] Equity floor check ($10k minimum)
+- [x] Position size limits (10% max)
+- [x] Total exposure limits (50% max)
+- [x] Kill switch cooldown (24h)
+- [x] Unit tests (27 tests passing)
+- [x] Migration for state persistence
+
+### Configurable Thresholds
+
+All Phase 3f thresholds are configurable via environment variables in `docker-compose.yml`:
+
+| Variable | Default | Production | Description |
+|----------|---------|------------|-------------|
+| `SNAPSHOT_MIN_EPISODES` | 5 | 30 | Min episodes for FDR qualification |
+| `SNAPSHOT_FDR_ALPHA` | 0.10 | 0.10 | FDR control level (10%) |
+| `SNAPSHOT_MIN_AVG_R_NET` | 0.0 | 0.05 | Min avg R-multiple after costs |
+| `ROUND_TRIP_COST_BPS` | 30 | 30 | Cost estimate in basis points |
+| `DEATH_DRAWDOWN_PCT` | 0.80 | 0.80 | Drawdown threshold for death (80%) |
+| `DEATH_ACCOUNT_FLOOR` | 10000 | 10000 | Min account value ($10k) |
+| `CENSOR_INACTIVE_DAYS` | 30 | 30 | Days without fills = censored |
+
+**Testing Mode**: Default thresholds are lowered (5 episodes, 0 min R) to allow testing with limited data.
+
+**Production Mode**: Set stricter thresholds for real deployment:
+```bash
+SNAPSHOT_MIN_EPISODES=30
+SNAPSHOT_MIN_AVG_R_NET=0.05
+```
+
+### Fresh Install: Automatic Initialization
+
+When you run `docker compose up -d` on a fresh database, **hl-sage automatically initializes the Alpha Pool**:
+
+1. Detects empty Alpha Pool (fresh install)
+2. Refreshes from Hyperliquid leaderboard (50 traders)
+3. Backfills historical fills for all addresses
+4. Creates initial snapshot for FDR qualification
+
+**Watch initialization progress:**
+```bash
+docker compose logs -f hl-sage
+```
+
+#### Manual Initialization (Optional)
+
+If automatic init is disabled or you want custom options:
+
+```bash
+# Option 1: Make command
+make init
+
+# Option 2: NPM script (cross-platform)
+npm run init:alpha-pool
+
+# Option 3: With custom options
+node scripts/init-alpha-pool.mjs --limit 100 --delay 1000
+```
+
+#### Disable Automatic Initialization
+
+Set in docker-compose.yml or .env:
+```bash
+ALPHA_POOL_AUTO_INIT=false
+```
+
+See [Phase 3f Test Cases](PHASE_3F_TEST_CASES.md) for detailed verification steps.
+
+### Success Criteria
+
+| Criteria | Pass Condition | Status |
+|----------|----------------|--------|
+| Shadow Ledger | Can compute survival curves by cohort | ✅ Death/censor tracking implemented |
+| Walk-Forward | Out-of-sample results include costs | ✅ 30bps round-trip in net R |
+| FDR Control | Pool reduced AND out-of-sample stability improves | ✅ BH procedure implemented |
+| Risk Governor | DD kill switch triggers in tests | ✅ 27 tests verify behavior |
+
+---
+
+## Phase 4: Risk Management
+
+### Goal
+Implement Kelly criterion position sizing and real trade execution.
+
+### Already Done (Phase 3e Foundation)
+- ✅ Risk limit validation (max position, max exposure)
+- ✅ Real-time exposure tracking via Hyperliquid API
+- ✅ Dry-run execution with full logging
+- ✅ Signal cooldown (300s default)
+- ✅ Execution config database table
 
 ### Tasks
 
@@ -182,27 +426,23 @@ def position_size(kelly, account_value, fraction=0.25):
     return kelly * fraction * account_value
 ```
 
-#### 4.2 Risk Limits (Enforce)
-- [ ] Max position size: 5% of account
-- [ ] Max total exposure: 20%
-- [ ] Max concurrent positions: 3
-- [ ] Daily drawdown limit: -10%
-- [ ] Implement real-time exposure tracking
+#### 4.2 Real Execution
+- [ ] Private key secure storage (KMS or secrets manager)
+- [ ] Hyperliquid SDK order placement integration
+- [ ] Fill confirmation and position tracking
+- [ ] Error handling and retry logic
 
-#### 4.3 Paper Trading Mode
-- [ ] Simulation mode to validate signals
-- [ ] Track simulated P&L without execution
-- [ ] Compare signals vs actual market moves
+#### 4.3 Position Management
+- [ ] Stop-loss order placement
+- [ ] Take-profit targets
+- [ ] Trailing stops for trending markets
+- [ ] Position scaling (partial exits)
 
-#### 4.4 Signal Cooldown
-- [ ] Implement per-symbol cooldown (already configured: 300s)
-- [ ] Track last signal time per asset
-- [ ] Reject rapid-fire signals
-
-#### 4.5 E2E Test Hardening
-- [ ] Add `data-testid` selectors to dashboard
-- [ ] Enable `webServer` in Playwright config
-- [ ] Assert backend state changes (not just UI)
+#### 4.4 Risk Circuit Breakers
+- [ ] Daily drawdown halt (-5% default, -10% hard limit)
+- [ ] Max concurrent positions (3)
+- [ ] Per-symbol position limits
+- [ ] Execution pause on API errors
 
 ---
 
@@ -226,17 +466,16 @@ Adapt strategy parameters based on market conditions.
 
 ---
 
-## Phase 6-7: Execution
+## Phase 6: Multi-Exchange Integration
 
-### Phase 6: Read-Only Integration
-- [ ] Connect to Hyperliquid API (read-only)
-- [ ] Track account positions
-- [ ] Monitor fills for paper trading
+### Goal
+Expand beyond Hyperliquid to support additional exchanges.
 
-### Phase 7: Automated Execution
-- [ ] Implement order placement
-- [ ] Position management (stop-loss, take-profit)
-- [ ] Risk circuit breakers
+### Tasks
+- [ ] Abstract exchange interface
+- [ ] Add Binance/Bybit support
+- [ ] Unified position tracking across exchanges
+- [ ] Cross-exchange risk management
 
 ---
 
@@ -266,11 +505,18 @@ Adapt strategy parameters based on market conditions.
 |-----------|------|
 | NIG Model | `services/hl-sage/app/bandit.py` |
 | Thompson Sampling | `services/hl-sage/app/main.py` |
+| Shadow Ledger | `services/hl-sage/app/snapshot.py` |
+| Walk-Forward Replay | `services/hl-sage/app/walkforward.py` |
 | Consensus Detection | `services/hl-decide/app/consensus.py` |
 | ATR Provider | `services/hl-decide/app/atr.py` |
 | Correlation | `services/hl-decide/app/correlation.py` |
 | Episode Tracker | `services/hl-decide/app/episode.py` |
+| Decision Logger | `services/hl-decide/app/decision_logger.py` |
+| Risk Governor | `services/hl-decide/app/risk_governor.py` |
+| Portfolio Manager | `services/hl-decide/app/portfolio.py` |
+| Trade Executor | `services/hl-decide/app/executor.py` |
 | Dashboard | `services/hl-stream/public/dashboard.html` |
+| Init Script | `scripts/init-alpha-pool.mjs` |
 
 ---
 
@@ -386,4 +632,4 @@ docker compose logs -f hl-decide
 
 ---
 
-*Last updated: December 2025*
+*Last updated: December 12, 2025 (Phase 3f Complete, Phase 4 Next)*

@@ -3311,6 +3311,539 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 });
 
 // =====================
+// Decision Logging & Stats
+// =====================
+
+// State
+let decisionLogs = [];
+let decisionLogsOffset = 0;
+let decisionLogsLoading = false;
+let decisionFilter = 'all'; // 'all', 'signal', 'skip'
+const DECISIONS_LIMIT = 20;
+
+// DOM Elements
+const decisionListEl = document.getElementById('decision-list');
+const decisionLoadMoreEl = document.getElementById('decision-load-more');
+const decisionLoadMoreBtn = document.getElementById('decision-load-more-btn');
+const decisionFilterBtns = document.querySelectorAll('.decision-filter .filter-btn');
+
+// Stats elements
+const statSignalsValue = document.getElementById('stat-signals-value');
+const statWinRateValue = document.getElementById('stat-win-rate-value');
+const statAvgRValue = document.getElementById('stat-avg-r-value');
+const statTotalRValue = document.getElementById('stat-total-r-value');
+const statSkippedValue = document.getElementById('stat-skipped-value');
+const statSkipRateValue = document.getElementById('stat-skip-rate-value');
+
+/**
+ * Fetch decision stats from hl-decide
+ */
+async function fetchDecisionStats() {
+  try {
+    const res = await fetch(`${API_BASE}/decisions/stats?days=7`);
+    if (!res.ok) throw new Error('Failed to fetch decision stats');
+    const data = await res.json();
+    renderDecisionStats(data);
+  } catch (err) {
+    console.error('Failed to fetch decision stats:', err);
+  }
+}
+
+/**
+ * Render decision stats to the stats bar
+ */
+function renderDecisionStats(stats) {
+  if (statSignalsValue) {
+    statSignalsValue.textContent = stats.signals || 0;
+  }
+  if (statWinRateValue) {
+    const winRate = stats.win_rate || 0;
+    statWinRateValue.textContent = `${winRate}%`;
+    statWinRateValue.classList.toggle('positive', winRate >= 50);
+    statWinRateValue.classList.toggle('negative', winRate < 50 && winRate > 0);
+  }
+  if (statAvgRValue) {
+    const avgR = stats.avg_result_r || 0;
+    statAvgRValue.textContent = avgR >= 0 ? `+${avgR.toFixed(2)}R` : `${avgR.toFixed(2)}R`;
+    statAvgRValue.classList.toggle('positive', avgR > 0);
+    statAvgRValue.classList.toggle('negative', avgR < 0);
+  }
+  if (statTotalRValue) {
+    const totalR = stats.total_r || 0;
+    statTotalRValue.textContent = totalR >= 0 ? `+${totalR.toFixed(1)}R` : `${totalR.toFixed(1)}R`;
+    statTotalRValue.classList.toggle('positive', totalR > 0);
+    statTotalRValue.classList.toggle('negative', totalR < 0);
+  }
+  if (statSkippedValue) {
+    statSkippedValue.textContent = stats.skipped || 0;
+  }
+  if (statSkipRateValue) {
+    statSkipRateValue.textContent = `${stats.skip_rate || 0}%`;
+  }
+}
+
+/**
+ * Fetch decision logs from hl-decide
+ */
+async function fetchDecisionLogs(reset = false) {
+  if (decisionLogsLoading) return;
+  decisionLogsLoading = true;
+
+  if (reset) {
+    decisionLogsOffset = 0;
+    decisionLogs = [];
+  }
+
+  try {
+    const typeParam = decisionFilter !== 'all' ? `&decision_type=${decisionFilter}` : '';
+    const res = await fetch(`${API_BASE}/decisions?limit=${DECISIONS_LIMIT}&offset=${decisionLogsOffset}${typeParam}`);
+    if (!res.ok) throw new Error('Failed to fetch decision logs');
+    const data = await res.json();
+
+    if (reset) {
+      decisionLogs = data.items || [];
+    } else {
+      decisionLogs = [...decisionLogs, ...(data.items || [])];
+    }
+    decisionLogsOffset += data.items?.length || 0;
+
+    renderDecisionLogs();
+
+    // Show/hide load more button
+    if (decisionLoadMoreEl) {
+      decisionLoadMoreEl.style.display = (data.items?.length || 0) >= DECISIONS_LIMIT ? 'block' : 'none';
+    }
+  } catch (err) {
+    console.error('Failed to fetch decision logs:', err);
+  } finally {
+    decisionLogsLoading = false;
+  }
+}
+
+/**
+ * Format a date for display
+ */
+function formatDecisionTime(isoString) {
+  const date = new Date(isoString);
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+
+  if (diffMins < 1) return 'Just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+/**
+ * Render decision logs to the UI
+ */
+function renderDecisionLogs() {
+  if (!decisionListEl) return;
+
+  if (decisionLogs.length === 0) {
+    decisionListEl.innerHTML = `
+      <div class="decision-empty">
+        <p>No decision logs yet.</p>
+        <p>Decisions will appear when the consensus detector evaluates potential signals.</p>
+      </div>
+    `;
+    return;
+  }
+
+  decisionListEl.innerHTML = decisionLogs.map(decision => {
+    const typeClass = decision.decision_type || 'skip';
+    const direction = decision.direction || 'none';
+    const dirClass = direction === 'long' ? 'long' : direction === 'short' ? 'short' : '';
+
+    // Format gate results for expandable section
+    const gatesHtml = (decision.gates || []).map(gate => {
+      const statusClass = gate.passed ? 'passed' : 'failed';
+      const statusIcon = gate.passed ? '✓' : '✗';
+      const valueStr = typeof gate.value === 'number' ?
+        (gate.name === 'supermajority' ? `${(gate.value * 100).toFixed(0)}%` :
+         gate.name === 'effective_k' ? gate.value.toFixed(1) :
+         gate.name === 'ev_gate' ? `${gate.value.toFixed(2)}R` :
+         gate.name === 'freshness' ? `${gate.value.toFixed(0)}s` :
+         gate.name === 'price_band' ? `${gate.value.toFixed(2)}R` :
+         gate.value.toFixed(2)) : String(gate.value);
+      const threshStr = typeof gate.threshold === 'number' ?
+        (gate.name === 'supermajority' ? `${(gate.threshold * 100).toFixed(0)}%` :
+         gate.name === 'effective_k' ? gate.threshold.toFixed(1) :
+         gate.name === 'ev_gate' ? `${gate.threshold.toFixed(2)}R` :
+         gate.name === 'freshness' ? `${gate.threshold.toFixed(0)}s` :
+         gate.name === 'price_band' ? `${gate.threshold.toFixed(2)}R` :
+         gate.threshold.toFixed(2)) : String(gate.threshold);
+
+      return `
+        <div class="gate-item">
+          <span class="gate-status ${statusClass}">${statusIcon}</span>
+          <span class="gate-name">${gate.name}</span>
+          <span class="gate-value">${valueStr} / ${threshStr}</span>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div class="decision-card type-${typeClass}" data-decision-id="${decision.id}">
+        <div class="decision-header">
+          <div class="decision-meta">
+            <span class="decision-type-badge ${typeClass}">${typeClass.replace('_', ' ')}</span>
+            <span class="decision-symbol">${decision.symbol}</span>
+            <span class="decision-direction ${dirClass}">${direction.toUpperCase()}</span>
+          </div>
+          <span class="decision-time">${formatDecisionTime(decision.created_at)}</span>
+        </div>
+        <div class="decision-reasoning">${decision.reasoning || 'No reasoning available.'}</div>
+        <div class="decision-metrics">
+          <div class="decision-metric">
+            <span class="metric-label">Traders:</span>
+            <span class="metric-value">${decision.trader_count || 0}</span>
+          </div>
+          <div class="decision-metric">
+            <span class="metric-label">Agreement:</span>
+            <span class="metric-value">${decision.agreement_pct ? (decision.agreement_pct * 100).toFixed(0) + '%' : '—'}</span>
+          </div>
+          <div class="decision-metric">
+            <span class="metric-label">EffK:</span>
+            <span class="metric-value">${decision.effective_k ? decision.effective_k.toFixed(1) : '—'}</span>
+          </div>
+          ${decision.ev_estimate ? `
+          <div class="decision-metric">
+            <span class="metric-label">EV:</span>
+            <span class="metric-value">${decision.ev_estimate.toFixed(2)}R</span>
+          </div>
+          ` : ''}
+          ${decision.outcome_r_multiple !== null && decision.outcome_r_multiple !== undefined ? `
+          <div class="decision-metric">
+            <span class="metric-label">Result:</span>
+            <span class="metric-value ${decision.outcome_r_multiple > 0 ? 'positive' : 'negative'}">${decision.outcome_r_multiple > 0 ? '+' : ''}${decision.outcome_r_multiple.toFixed(2)}R</span>
+          </div>
+          ` : ''}
+        </div>
+        <div class="decision-gates">
+          <div class="gate-list">
+            ${gatesHtml}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Add click handlers for expanding cards
+  decisionListEl.querySelectorAll('.decision-card').forEach(card => {
+    card.addEventListener('click', () => {
+      card.classList.toggle('expanded');
+    });
+  });
+}
+
+// Event listeners for decision log
+if (decisionFilterBtns) {
+  decisionFilterBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      decisionFilterBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      decisionFilter = btn.getAttribute('data-filter');
+      fetchDecisionLogs(true);
+    });
+  });
+}
+
+if (decisionLoadMoreBtn) {
+  decisionLoadMoreBtn.addEventListener('click', () => {
+    fetchDecisionLogs(false);
+  });
+}
+
+// Initial load
+fetchDecisionStats();
+fetchDecisionLogs(true);
+
+// Refresh periodically
+setInterval(fetchDecisionStats, 60000);
+setInterval(() => fetchDecisionLogs(true), 60000);
+
+// =====================
+// Portfolio Overview & Auto-Trade
+// =====================
+
+// Portfolio state
+let portfolioData = null;
+let executionConfig = null;
+let livePositions = [];
+
+// DOM elements for overview
+const equityValueEl = document.getElementById('equity-value');
+const unrealizedPnlEl = document.getElementById('unrealized-pnl');
+const positionCountEl = document.getElementById('position-count');
+const exposurePctEl = document.getElementById('exposure-pct');
+const portfolioStatusEl = document.getElementById('portfolio-status');
+const positionsTbody = document.getElementById('positions-tbody');
+const positionsCountBadge = document.getElementById('positions-count-badge');
+const toggleStatusEl = document.getElementById('toggle-status');
+const autoTradeToggleEl = document.getElementById('autotrade-toggle');
+const maxLeverageEl = document.getElementById('max-leverage');
+const maxPositionEl = document.getElementById('max-position');
+const maxExposureEl = document.getElementById('max-exposure');
+
+/**
+ * Format currency value with appropriate precision
+ */
+function formatCurrency(value, showSign = false) {
+  if (value == null || !Number.isFinite(value)) return '—';
+  const sign = showSign && value >= 0 ? '+' : '';
+  return sign + '$' + Math.abs(value).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+}
+
+/**
+ * Format percentage value
+ */
+function formatPercent(value) {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return (value * 100).toFixed(1) + '%';
+}
+
+/**
+ * Fetch portfolio summary from API
+ */
+async function fetchPortfolio() {
+  try {
+    const res = await fetch(`${API_BASE}/portfolio`);
+    if (!res.ok) {
+      console.warn('Portfolio fetch failed:', res.status);
+      return;
+    }
+    portfolioData = await res.json();
+    renderPortfolioOverview();
+  } catch (err) {
+    console.error('Portfolio fetch error:', err);
+  }
+}
+
+/**
+ * Fetch execution config (auto-trade settings)
+ */
+async function fetchExecutionConfig() {
+  try {
+    const res = await fetch(`${API_BASE}/execution/config`);
+    if (!res.ok) {
+      console.warn('Execution config fetch failed:', res.status);
+      return;
+    }
+    executionConfig = await res.json();
+    renderAutoTradeStatus();
+  } catch (err) {
+    console.error('Execution config fetch error:', err);
+  }
+}
+
+/**
+ * Toggle auto-trade enabled state
+ */
+async function toggleAutoTrade() {
+  if (!executionConfig) return;
+
+  const newEnabled = !executionConfig.enabled;
+
+  try {
+    const res = await fetch(`${API_BASE}/execution/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: newEnabled })
+    });
+
+    if (res.ok) {
+      executionConfig = await res.json();
+      renderAutoTradeStatus();
+    } else {
+      alert('Failed to update auto-trade settings');
+    }
+  } catch (err) {
+    console.error('Toggle auto-trade error:', err);
+    alert('Failed to update auto-trade settings');
+  }
+}
+
+/**
+ * Render portfolio overview card
+ */
+function renderPortfolioOverview() {
+  if (!portfolioData) return;
+
+  const positions = portfolioData.positions || [];
+  // Get exposure from first exchange (Hyperliquid only for now)
+  const exchange = portfolioData.exchanges?.[0] || {};
+
+  // Update equity value
+  if (equityValueEl) {
+    const equity = portfolioData.total_equity || 0;
+    equityValueEl.textContent = formatCurrency(equity);
+  }
+
+  // Update unrealized P&L
+  if (unrealizedPnlEl) {
+    const pnl = portfolioData.total_unrealized_pnl || 0;
+    unrealizedPnlEl.textContent = formatCurrency(pnl, true);
+    unrealizedPnlEl.className = 'detail-value ' + (pnl >= 0 ? 'positive' : 'negative');
+  }
+
+  // Update position count
+  if (positionCountEl) {
+    positionCountEl.textContent = positions.length;
+  }
+
+  // Update exposure percentage
+  if (exposurePctEl) {
+    // API returns exposure as percentage (e.g., 25.5 for 25.5%)
+    const exposurePct = exchange.total_exposure_pct || 0;
+    exposurePctEl.textContent = exposurePct.toFixed(1) + '%';
+    // Add warning class if exposure is high (>50%)
+    exposurePctEl.className = 'detail-value' + (exposurePct > 50 ? ' warning' : '');
+  }
+
+  // Update portfolio status footer
+  if (portfolioStatusEl) {
+    if (!portfolioData.configured) {
+      portfolioStatusEl.innerHTML = `<span class="status-text">${portfolioData.message || 'Not configured'}</span>`;
+    } else if (portfolioData.error) {
+      portfolioStatusEl.innerHTML = `<span class="status-text error">${portfolioData.error}</span>`;
+    } else if (portfolioData.total_equity && portfolioData.total_equity > 0) {
+      portfolioStatusEl.innerHTML = `<span class="status-text connected">Connected to Hyperliquid</span>`;
+    } else {
+      portfolioStatusEl.innerHTML = `<span class="status-text">Connected (no balance)</span>`;
+    }
+  }
+
+  // Update positions count badge
+  if (positionsCountBadge) {
+    positionsCountBadge.textContent = positions.length;
+  }
+
+  // Render positions table
+  renderLivePositions(positions);
+}
+
+/**
+ * Render live positions table
+ */
+function renderLivePositions(positions) {
+  if (!positionsTbody) return;
+
+  if (!positions || positions.length === 0) {
+    positionsTbody.innerHTML = `
+      <tr class="empty-row">
+        <td colspan="6">No open positions</td>
+      </tr>
+    `;
+    return;
+  }
+
+  positionsTbody.innerHTML = positions.map(pos => {
+    const symbol = pos.symbol || '—';
+    const side = (pos.side || '').toLowerCase();
+    const sideClass = side === 'long' ? 'positive' : side === 'short' ? 'negative' : '';
+    const size = Math.abs(pos.size || 0);
+    const entryPrice = pos.entry_price || 0;
+    const markPrice = pos.mark_price || pos.entry_price || 0;
+    const pnl = pos.unrealized_pnl || 0;
+    const pnlClass = pnl >= 0 ? 'positive' : 'negative';
+    const leverage = pos.leverage || 1;
+
+    // Calculate P&L percentage if we have entry price
+    let pnlPct = '';
+    if (entryPrice > 0 && pos.unrealized_pnl != null) {
+      const pctValue = (pnl / (size * entryPrice)) * 100 * leverage;
+      pnlPct = ` (${pctValue >= 0 ? '+' : ''}${pctValue.toFixed(1)}%)`;
+    }
+
+    return `
+      <tr>
+        <td class="symbol-cell">${symbol}</td>
+        <td class="side-cell ${sideClass}">${side.toUpperCase()}</td>
+        <td class="size-cell">${size.toFixed(4)}</td>
+        <td class="price-cell">$${Number(entryPrice).toLocaleString()}</td>
+        <td class="mark-cell">$${Number(markPrice).toLocaleString()}</td>
+        <td class="pnl-cell ${pnlClass}">${formatCurrency(pnl, true)}${pnlPct}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+/**
+ * Render auto-trade status card
+ */
+function renderAutoTradeStatus() {
+  if (!executionConfig || !executionConfig.configured) {
+    // Show placeholder state
+    if (toggleStatusEl) toggleStatusEl.textContent = '—';
+    return;
+  }
+
+  const enabled = executionConfig.enabled;
+  const hl = executionConfig.hyperliquid || {};
+
+  // Update main toggle status
+  if (toggleStatusEl) {
+    toggleStatusEl.textContent = enabled ? 'ON' : 'OFF';
+    toggleStatusEl.className = 'toggle-status ' + (enabled ? 'on' : 'off');
+  }
+
+  // Update parent toggle element class for styling
+  if (autoTradeToggleEl) {
+    autoTradeToggleEl.className = 'autotrade-toggle ' + (enabled ? 'on' : 'off');
+  }
+
+  // Update max leverage (API returns raw value)
+  if (maxLeverageEl) {
+    const leverage = hl.max_leverage || 3;
+    maxLeverageEl.textContent = `${leverage}x`;
+  }
+
+  // Update max position (API returns percentage value)
+  if (maxPositionEl) {
+    const maxPos = hl.max_position_pct || 2;
+    maxPositionEl.textContent = `${maxPos.toFixed(0)}%`;
+  }
+
+  // Update max exposure (API returns percentage value)
+  if (maxExposureEl) {
+    const maxExp = hl.max_exposure_pct || 10;
+    maxExposureEl.textContent = `${maxExp.toFixed(0)}%`;
+  }
+}
+
+/**
+ * Initialize overview section
+ */
+function initOverview() {
+  // Set up toggle listener (the toggle is a clickable span, not an input)
+  if (autoTradeToggleEl) {
+    autoTradeToggleEl.addEventListener('click', toggleAutoTrade);
+  }
+
+  // Initial fetches
+  fetchPortfolio();
+  fetchExecutionConfig();
+
+  // Periodic refresh
+  setInterval(fetchPortfolio, 30000); // Every 30 seconds
+  setInterval(fetchExecutionConfig, 60000); // Every minute
+}
+
+// Initialize on DOMContentLoaded (runs after main init)
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initOverview);
+} else {
+  initOverview();
+}
+
+// =====================
 // Tab Restoration (must be after Alpha Pool is defined)
 // =====================
 const savedTab = localStorage.getItem('activeTab');

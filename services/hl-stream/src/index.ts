@@ -1255,7 +1255,19 @@ async function main() {
       if (idx >= 0) {
         target.search = req.originalUrl.slice(idx);
       }
-      const response = await fetch(target, { headers: { 'x-owner-key': OWNER_TOKEN } });
+
+      const fetchOptions: RequestInit = {
+        method: req.method,
+        headers: { 'x-owner-key': OWNER_TOKEN },
+      };
+
+      // Forward request body for POST/PUT/PATCH
+      if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body) {
+        fetchOptions.body = JSON.stringify(req.body);
+        (fetchOptions.headers as Record<string, string>)['Content-Type'] = 'application/json';
+      }
+
+      const response = await fetch(target, fetchOptions);
       const body = await response.text();
       const type = response.headers.get('content-type') || 'application/json';
       res.status(response.status).setHeader('Content-Type', type).send(body);
@@ -1267,6 +1279,20 @@ async function main() {
 
   app.get('/dashboard/api/consensus/signals', (req, res) => proxyDecide('/consensus/signals', req, res));
   app.get('/dashboard/api/consensus/stats', (req, res) => proxyDecide('/consensus/stats', req, res));
+
+  // Decision logging API routes (hl-decide)
+  // Lists all decisions (signals, skips, risk rejections) with human-readable reasoning
+  app.get('/dashboard/api/decisions', (req, res) => proxyDecide('/decisions', req, res));
+  app.get('/dashboard/api/decisions/stats', (req, res) => proxyDecide('/decisions/stats', req, res));
+  app.get('/dashboard/api/decisions/:id', (req, res) => proxyDecide(`/decisions/${req.params.id}`, req, res));
+
+  // Portfolio & Execution API routes (hl-decide)
+  // Account equity, positions, and auto-trade configuration
+  app.get('/dashboard/api/portfolio', (req, res) => proxyDecide('/portfolio', req, res));
+  app.get('/dashboard/api/portfolio/positions', (req, res) => proxyDecide('/portfolio/positions', req, res));
+  app.get('/dashboard/api/execution/config', (req, res) => proxyDecide('/execution/config', req, res));
+  app.post('/dashboard/api/execution/config', (req, res) => proxyDecide('/execution/config', req, res));
+  app.get('/dashboard/api/execution/logs', (req, res) => proxyDecide('/execution/logs', req, res));
 
   // =====================
   // LEGACY TAB ENDPOINTS

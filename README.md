@@ -61,6 +61,7 @@ Signals only fire when:
 make install     # Install dependencies
 cp .env.example .env
 make up          # Start all services
+make init        # Initialize Alpha Pool with historical data
 ```
 
 **Dashboard**: http://localhost:4102/dashboard
@@ -68,6 +69,7 @@ make up          # Start all services
 Run `make help` for all available commands.
 
 > **Windows Users**: Install make via `choco install make` or use npm scripts directly.
+> Alternative: `npm install && docker compose up -d && npm run init:alpha-pool`
 
 ## Documentation
 

@@ -30,7 +30,8 @@
     "docker:logs": "docker compose logs -f",
     "docker:ps": "docker compose ps",
     "admin:refresh": "node scripts/admin-refresh.mjs",
-    "admin:refresh:status": "node scripts/admin-refresh.mjs --status"
+    "admin:refresh:status": "node scripts/admin-refresh.mjs --status",
+    "init:alpha-pool": "node scripts/init-alpha-pool.mjs"
   },
   "dependencies": {
     "@hl/ts-lib": "file:packages/ts-lib",

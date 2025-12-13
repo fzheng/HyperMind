@@ -1,7 +1,7 @@
 # Makefile for SigmaPilot
 
 .PHONY: test test-ts test-py test-e2e test-unit test-coverage build install clean help
-.PHONY: up down restart rebuild rebuild-clean logs ps wipe
+.PHONY: up down restart rebuild rebuild-clean logs ps wipe init
 
 # Default target
 help:
@@ -24,6 +24,7 @@ help:
 	@echo "  make wipe          Stop, remove volumes, rebuild, and start fresh"
 	@echo "  make logs          Follow service logs"
 	@echo "  make ps            Show service status"
+	@echo "  make init          Initialize Alpha Pool with historical data"
 	@echo ""
 	@echo "Development:"
 	@echo "  make build         Build TypeScript"
@@ -109,6 +110,14 @@ wipe:
 	docker compose build --no-cache
 	docker compose up -d
 	@echo "Fresh environment started. Database will be re-initialized."
+	@echo "Run 'make init' to populate the Alpha Pool."
+
+# Initialize Alpha Pool with historical data (run after fresh install)
+# Uses npm script which works cross-platform (Windows, Mac, Linux)
+init:
+	@echo "Initializing Alpha Pool with historical data..."
+	@echo "This may take several minutes depending on the number of traders."
+	npm run init:alpha-pool
 
 # Follow logs
 logs:
