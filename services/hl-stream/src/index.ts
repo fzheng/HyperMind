@@ -1294,6 +1294,12 @@ async function main() {
   app.post('/dashboard/api/execution/config', (req, res) => proxyDecide('/execution/config', req, res));
   app.get('/dashboard/api/execution/logs', (req, res) => proxyDecide('/execution/logs', req, res));
 
+  // Market Regime Detection API routes (hl-decide)
+  // Detects trending/ranging/volatile market conditions for strategy adaptation
+  app.get('/dashboard/api/regime', (req, res) => proxyDecide('/regime', req, res));
+  app.get('/dashboard/api/regime/params', (req, res) => proxyDecide('/regime/params', req, res));
+  app.get('/dashboard/api/regime/:asset', (req, res) => proxyDecide(`/regime/${req.params.asset}`, req, res));
+
   // =====================
   // LEGACY TAB ENDPOINTS
   // =====================

@@ -1,5 +1,5 @@
 """
-Extended tests for Risk Governor module (Phase 3f).
+Extended tests for Risk Governor module.
 
 These tests cover edge cases and integration scenarios:
 1. Kill switch state transitions
@@ -7,6 +7,7 @@ These tests cover edge cases and integration scenarios:
 3. Warning aggregation
 4. Boundary conditions
 5. State persistence scenarios
+6. Circuit breaker behavior
 """
 import pytest
 from datetime import datetime, timezone, timedelta

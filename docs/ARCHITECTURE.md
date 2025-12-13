@@ -135,6 +135,8 @@ Each service exposes:
 **Shared**:
 - `GET /dashboard/api/prices` — Real-time BTC/ETH prices
 - `GET /dashboard/api/consensus/signals` — Recent consensus signals
+- `GET /dashboard/api/regime` — Market regime for all assets
+- `GET /dashboard/api/regime/{asset}` — Market regime for specific asset
 - `WebSocket /ws` — Live fill stream
 
 ## Environment Variables
@@ -154,9 +156,9 @@ Key configuration (see `.env.example`):
 
 ## Testing
 
-- **TypeScript**: Jest (973 tests)
-- **Python**: pytest (151 tests)
-- **E2E**: Playwright (150 tests)
+- **TypeScript**: Jest (1,035 tests)
+- **Python**: pytest (348 tests)
+- **E2E**: Playwright (220 tests)
 - **Coverage**: ~76% overall, ~89% for ts-lib
 
 ```bash

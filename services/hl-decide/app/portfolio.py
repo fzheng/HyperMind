@@ -2,7 +2,7 @@
 Portfolio Management for SigmaPilot
 
 Fetches account state and positions from Hyperliquid.
-Phase 3e: Hyperliquid only. Multi-exchange support in Phase 4.
+Provides execution configuration and logging for trade execution.
 
 @module portfolio
 """

@@ -3426,6 +3426,116 @@ td {
   color: var(--text-muted);
 }
 
+/* Market Regime Card */
+.regime-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+}
+
+.regime-badge.trending {
+  background: var(--positive-bg);
+  color: var(--positive-text);
+  border: 1px solid var(--positive-border);
+}
+
+.regime-badge.ranging {
+  background: rgba(59, 130, 246, 0.1);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+}
+
+.regime-badge.volatile {
+  background: var(--negative-bg);
+  color: var(--negative-text);
+  border: 1px solid var(--negative-border);
+}
+
+.regime-badge.mixed {
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.regime-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.regime-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.regime-asset {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  min-width: 30px;
+}
+
+.regime-value {
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: capitalize;
+  color: var(--text-primary);
+}
+
+.regime-value.trending {
+  color: var(--positive-text);
+}
+
+.regime-value.ranging {
+  color: #60a5fa;
+}
+
+.regime-value.volatile {
+  color: var(--negative-text);
+}
+
+.regime-confidence {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.regime-params {
+  display: flex;
+  gap: 16px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-primary);
+}
+
+.param-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.param-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.param-value {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
 /* Positions Card */
 .positions-count {
   display: inline-flex;

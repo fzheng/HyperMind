@@ -155,6 +155,42 @@
               </div>
             </div>
 
+            <!-- Market Regime Card -->
+            <div class="overview-card regime-card" data-testid="regime-card">
+              <div class="overview-card-header">
+                <span class="overview-icon">🌊</span>
+                <span class="overview-title">Market Regime</span>
+                <span class="regime-badge" id="regime-badge" data-testid="regime-badge">—</span>
+              </div>
+              <div class="overview-card-body">
+                <div class="regime-details" id="regime-details" data-testid="regime-details">
+                  <div class="regime-row">
+                    <span class="regime-asset">BTC</span>
+                    <span class="regime-value" id="regime-btc" data-testid="regime-btc">—</span>
+                    <span class="regime-confidence" id="regime-btc-conf">—</span>
+                  </div>
+                  <div class="regime-row">
+                    <span class="regime-asset">ETH</span>
+                    <span class="regime-value" id="regime-eth" data-testid="regime-eth">—</span>
+                    <span class="regime-confidence" id="regime-eth-conf">—</span>
+                  </div>
+                </div>
+                <div class="regime-params" id="regime-params" data-testid="regime-params">
+                  <div class="param-row">
+                    <span class="param-label">Kelly Adj</span>
+                    <span class="param-value" id="regime-kelly-adj">—</span>
+                  </div>
+                  <div class="param-row">
+                    <span class="param-label">Stop Adj</span>
+                    <span class="param-value" id="regime-stop-adj">—</span>
+                  </div>
+                </div>
+              </div>
+              <div class="overview-card-footer" id="regime-status" data-testid="regime-status">
+                <span class="status-text">Loading...</span>
+              </div>
+            </div>
+
             <!-- Live Positions Card -->
             <div class="overview-card positions-card" data-testid="positions-card">
               <div class="overview-card-header">

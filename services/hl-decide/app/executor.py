@@ -4,7 +4,11 @@ Hyperliquid Trade Executor
 Executes trades on Hyperliquid when consensus signals fire.
 Disabled by default - requires explicit configuration to enable.
 
-Phase 3e: Hyperliquid only. Multi-exchange in Phase 4.
+Features:
+- Kelly criterion position sizing (fractional Kelly, default 25%)
+- Risk governor integration for safety limits
+- Dry run mode by default (simulates execution)
+- Real execution requires explicit REAL_EXECUTION_ENABLED=true
 
 @module executor
 """
@@ -17,6 +21,17 @@ from typing import Any, Optional
 import httpx
 import asyncpg
 
+from .kelly import (
+    kelly_position_size,
+    get_consensus_kelly_size,
+    KellyInput,
+    KellyResult,
+    KELLY_ENABLED,
+    KELLY_FRACTION,
+    KELLY_MIN_EPISODES,
+    KELLY_FALLBACK_PCT,
+)
+
 
 # Hyperliquid API endpoints
 HL_INFO_API = os.getenv("HL_INFO_API", "https://api.hyperliquid.xyz/info")
@@ -26,29 +41,32 @@ HL_EXCHANGE_API = os.getenv("HL_EXCHANGE_API", "https://api.hyperliquid.xyz/exch
 @dataclass
 class ExecutionResult:
     """Result of a trade execution attempt."""
-    status: str  # "filled", "rejected", "failed"
+    status: str  # "filled", "rejected", "failed", "simulated"
     fill_price: Optional[float] = None
     fill_size: Optional[float] = None
     error_message: Optional[str] = None
     exposure_before: Optional[float] = None
     exposure_after: Optional[float] = None
     position_pct: Optional[float] = None
+    # Kelly sizing info (Phase 4)
+    kelly_result: Optional[KellyResult] = None
 
 
 class HyperliquidExecutor:
     """
     Execute trades on Hyperliquid.
 
-    This is a READ-ONLY implementation for Phase 3e.
-    Actual trade execution requires:
-    1. Private key configuration (secure storage)
-    2. Explicit enable via execution_config
+    By default, runs in dry-run mode (simulates execution).
+    Real execution requires:
+    1. Private key configuration (HL_PRIVATE_KEY env var)
+    2. Explicit enable via REAL_EXECUTION_ENABLED=true
     3. Risk limit checks passing
 
-    For now, this class:
+    Features:
     - Fetches account state (positions, equity)
-    - Validates risk limits
-    - Logs what would be executed (dry run)
+    - Kelly criterion position sizing
+    - Risk governor validation
+    - Comprehensive execution logging
     """
 
     def __init__(self, address: Optional[str] = None):
@@ -162,9 +180,12 @@ class HyperliquidExecutor:
 
     async def validate_execution(
         self,
+        db: asyncpg.Pool,
         symbol: str,
         direction: str,
         config: dict[str, Any],
+        consensus_addresses: Optional[list[str]] = None,
+        stop_distance_pct: float = 0.02,
     ) -> tuple[bool, str, dict]:
         """
         Validate if execution should proceed.
@@ -177,9 +198,12 @@ class HyperliquidExecutor:
         5. Account has value
 
         Args:
+            db: Database pool for Kelly data lookup
             symbol: Asset symbol
             direction: Trade direction (long/short)
             config: Execution config from database
+            consensus_addresses: List of trader addresses in consensus (for Kelly)
+            stop_distance_pct: Stop distance as fraction (for Kelly sizing)
 
         Returns:
             Tuple of (can_execute, reason, context_dict)
@@ -223,16 +247,40 @@ class HyperliquidExecutor:
             return False, f"Could not get price for {symbol}", context
         context["price"] = mid_price
 
-        # Calculate position size
-        max_position_pct = hl_config.get("max_position_pct", 2) / 100
-        max_size_usd = account_value * max_position_pct
-        size_coin = max_size_usd / mid_price
+        # Calculate position size - Kelly or fixed
+        kelly_enabled = config.get("kelly_enabled", KELLY_ENABLED)
+        kelly_result: Optional[KellyResult] = None
+
+        if kelly_enabled and consensus_addresses:
+            # Use Kelly criterion sizing based on consensus traders
+            kelly_fraction = config.get("kelly_fraction", KELLY_FRACTION)
+            kelly_result = await get_consensus_kelly_size(
+                db,
+                addresses=consensus_addresses,
+                account_value=account_value,
+                current_price=mid_price,
+                stop_distance_pct=stop_distance_pct,
+                fraction=kelly_fraction,
+            )
+            context["kelly_result"] = kelly_result
+            position_pct = kelly_result.position_pct
+            size_usd = kelly_result.position_size_usd
+            size_coin = kelly_result.position_size_coin
+            context["sizing_method"] = f"kelly:{kelly_result.method}"
+        else:
+            # Fixed percentage sizing (legacy)
+            max_position_pct = hl_config.get("max_position_pct", 2) / 100
+            position_pct = max_position_pct
+            size_usd = account_value * position_pct
+            size_coin = size_usd / mid_price
+            context["sizing_method"] = "fixed"
+
         context["size_coin"] = size_coin
-        context["size_usd"] = max_size_usd
-        context["position_pct"] = max_position_pct
+        context["size_usd"] = size_usd
+        context["position_pct"] = position_pct
 
         # Calculate new exposure
-        new_exposure = current_exposure + (max_size_usd / account_value)
+        new_exposure = current_exposure + (size_usd / account_value)
         context["exposure_after"] = new_exposure
 
         if new_exposure > max_exposure:
@@ -247,12 +295,14 @@ class HyperliquidExecutor:
         symbol: str,
         direction: str,
         config: dict[str, Any],
+        consensus_addresses: Optional[list[str]] = None,
+        stop_distance_pct: float = 0.02,
     ) -> ExecutionResult:
         """
         Execute a consensus signal.
 
         For Phase 3e, this performs validation and logging only (dry run).
-        Actual execution requires private key integration (Phase 4).
+        Phase 4 adds Kelly sizing and real execution.
 
         Args:
             db: Database pool for logging
@@ -260,20 +310,25 @@ class HyperliquidExecutor:
             symbol: Asset symbol (BTC, ETH)
             direction: Trade direction (long, short)
             config: Execution config from database
+            consensus_addresses: List of trader addresses in consensus (for Kelly)
+            stop_distance_pct: Stop distance as fraction (for Kelly sizing)
 
         Returns:
             ExecutionResult with status and details
         """
-        # Validate
+        # Validate with Kelly sizing if enabled
         can_execute, reason, context = await self.validate_execution(
-            symbol, direction, config
+            db, symbol, direction, config, consensus_addresses, stop_distance_pct
         )
+
+        kelly_result = context.get("kelly_result")
 
         if not can_execute:
             result = ExecutionResult(
                 status="rejected",
                 error_message=reason,
                 exposure_before=context.get("exposure_before"),
+                kelly_result=kelly_result,
             )
             await self._log_execution(db, decision_id, symbol, direction, config, result)
             return result
@@ -288,15 +343,18 @@ class HyperliquidExecutor:
             exposure_before=context.get("exposure_before"),
             exposure_after=context.get("exposure_after"),
             position_pct=context.get("position_pct"),
-            error_message="Dry run - execution disabled in Phase 3e",
+            error_message="Dry run - execution disabled",
+            kelly_result=kelly_result,
         )
 
         await self._log_execution(db, decision_id, symbol, direction, config, result)
 
+        sizing_method = context.get("sizing_method", "fixed")
         print(f"[executor] Simulated {direction} {symbol}: "
               f"size={context.get('size_coin'):.4f}, "
               f"price=${context.get('price'):,.2f}, "
-              f"exposure={context.get('exposure_before'):.1%} -> {context.get('exposure_after'):.1%}")
+              f"exposure={context.get('exposure_before'):.1%} -> {context.get('exposure_after'):.1%}, "
+              f"sizing={sizing_method}")
 
         return result
 
@@ -309,10 +367,27 @@ class HyperliquidExecutor:
         config: dict[str, Any],
         result: ExecutionResult,
     ) -> None:
-        """Log execution attempt to database."""
+        """Log execution attempt to database with Kelly sizing details."""
         try:
             hl_config = config.get("hyperliquid", {})
             leverage = hl_config.get("max_leverage", 1)
+
+            # Extract Kelly data if available
+            kelly_full = None
+            kelly_fraction_used = None
+            kelly_position_pct = None
+            kelly_method = None
+            kelly_reasoning = None
+            kelly_capped = False
+
+            if result.kelly_result:
+                kr = result.kelly_result
+                kelly_full = kr.full_kelly
+                kelly_fraction_used = kr.fractional_kelly
+                kelly_position_pct = kr.position_pct
+                kelly_method = kr.method
+                kelly_reasoning = kr.reasoning
+                kelly_capped = kr.capped
 
             async with db.acquire() as conn:
                 await conn.execute(
@@ -320,8 +395,11 @@ class HyperliquidExecutor:
                     INSERT INTO execution_logs
                     (decision_id, exchange, symbol, side, size, leverage, status,
                      fill_price, fill_size, error_message, account_value,
-                     position_pct, exposure_before, exposure_after)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                     position_pct, exposure_before, exposure_after,
+                     kelly_full, kelly_fraction_used, kelly_position_pct,
+                     kelly_method, kelly_reasoning, kelly_capped)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                            $15, $16, $17, $18, $19, $20)
                     """,
                     decision_id,
                     "hyperliquid",
@@ -337,6 +415,12 @@ class HyperliquidExecutor:
                     result.position_pct,
                     result.exposure_before,
                     result.exposure_after,
+                    kelly_full,
+                    kelly_fraction_used,
+                    kelly_position_pct,
+                    kelly_method,
+                    kelly_reasoning,
+                    kelly_capped,
                 )
         except Exception as e:
             print(f"[executor] Failed to log execution: {e}")
@@ -359,6 +443,8 @@ async def maybe_execute_signal(
     decision_id: str,
     symbol: str,
     direction: str,
+    consensus_addresses: Optional[list[str]] = None,
+    stop_distance_pct: float = 0.02,
 ) -> Optional[ExecutionResult]:
     """
     Execute a signal if auto-trading is enabled.
@@ -371,6 +457,8 @@ async def maybe_execute_signal(
         decision_id: The decision log ID
         symbol: Asset symbol (BTC, ETH)
         direction: Trade direction (long, short)
+        consensus_addresses: List of trader addresses in consensus (for Kelly sizing)
+        stop_distance_pct: Stop distance as fraction (for Kelly sizing)
 
     Returns:
         ExecutionResult if execution was attempted, None if disabled
@@ -383,6 +471,10 @@ async def maybe_execute_signal(
     if not config.get("configured") or not config.get("enabled"):
         return None  # Auto-trading disabled
 
-    # Execute
+    # Execute with Kelly sizing if enabled
     executor = get_executor()
-    return await executor.execute_signal(db, decision_id, symbol, direction, config)
+    return await executor.execute_signal(
+        db, decision_id, symbol, direction, config,
+        consensus_addresses=consensus_addresses,
+        stop_distance_pct=stop_distance_pct,
+    )

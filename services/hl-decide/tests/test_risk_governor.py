@@ -1,5 +1,5 @@
 """
-Tests for Risk Governor module (Phase 3f: Selection Integrity).
+Tests for Risk Governor module.
 
 These tests verify:
 1. Liquidation distance guard
@@ -7,6 +7,7 @@ These tests verify:
 3. Position size limits
 4. Exposure limits
 5. Kill switch behavior
+6. Circuit breakers
 """
 import pytest
 from datetime import datetime, timezone, timedelta

@@ -363,6 +363,53 @@ Signal generation and consensus detection (Python/FastAPI).
 }
 ```
 
+### Market Regime Detection (Phase 5)
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/regime` | GET | No | Get regime for all assets (BTC, ETH) |
+| `/regime/{asset}` | GET | No | Get regime for specific asset |
+| `/regime/params` | GET | No | Get regime parameter presets |
+
+**GET `/regime` Response:**
+```json
+{
+  "regimes": {
+    "BTC": {
+      "asset": "BTC",
+      "regime": "trending",
+      "confidence": 0.75,
+      "params": {
+        "stop_multiplier": 1.2,
+        "kelly_multiplier": 1.0,
+        "min_confidence_adjustment": 0.0,
+        "max_position_fraction": 1.0
+      },
+      "signals": {
+        "ma_spread_pct": 0.035,
+        "volatility_ratio": 0.85,
+        "price_range_pct": 0.025
+      },
+      "candles_used": 60
+    }
+  },
+  "summary": {
+    "trending": 1,
+    "ranging": 1,
+    "volatile": 0,
+    "unknown": 0
+  }
+}
+```
+
+**Regime Types:**
+| Regime | Detection | Strategy Adjustment |
+|--------|-----------|---------------------|
+| `trending` | MA spread > 2% | Wider stops (1.2x), full Kelly |
+| `ranging` | MAs converged, low vol | Tighter stops (0.8x), 75% Kelly |
+| `volatile` | ATR ratio > 1.5x | Wide stops (1.5x), 50% Kelly |
+| `unknown` | Insufficient data | Conservative defaults |
+
 ---
 
 ## NATS Message Topics

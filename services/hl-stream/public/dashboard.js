@@ -3573,6 +3573,7 @@ setInterval(() => fetchDecisionLogs(true), 60000);
 // Portfolio state
 let portfolioData = null;
 let executionConfig = null;
+let regimeData = null;
 let livePositions = [];
 
 // DOM elements for overview
@@ -3588,6 +3589,16 @@ const autoTradeToggleEl = document.getElementById('autotrade-toggle');
 const maxLeverageEl = document.getElementById('max-leverage');
 const maxPositionEl = document.getElementById('max-position');
 const maxExposureEl = document.getElementById('max-exposure');
+
+// DOM elements for regime
+const regimeBadgeEl = document.getElementById('regime-badge');
+const regimeBtcEl = document.getElementById('regime-btc');
+const regimeEthEl = document.getElementById('regime-eth');
+const regimeBtcConfEl = document.getElementById('regime-btc-conf');
+const regimeEthConfEl = document.getElementById('regime-eth-conf');
+const regimeKellyAdjEl = document.getElementById('regime-kelly-adj');
+const regimeStopAdjEl = document.getElementById('regime-stop-adj');
+const regimeStatusEl = document.getElementById('regime-status');
 
 /**
  * Format currency value with appropriate precision
@@ -3667,6 +3678,85 @@ async function toggleAutoTrade() {
   } catch (err) {
     console.error('Toggle auto-trade error:', err);
     alert('Failed to update auto-trade settings');
+  }
+}
+
+/**
+ * Fetch market regime data from API
+ */
+async function fetchRegimeData() {
+  try {
+    const res = await fetch(`${API_BASE}/regime`);
+    if (!res.ok) {
+      console.warn('Regime fetch failed:', res.status);
+      return;
+    }
+    regimeData = await res.json();
+    renderRegimeCard();
+  } catch (err) {
+    console.error('Regime fetch error:', err);
+  }
+}
+
+/**
+ * Render market regime card
+ */
+function renderRegimeCard() {
+  if (!regimeData) return;
+
+  const { BTC, ETH, summary } = regimeData;
+
+  // Update consensus regime badge
+  if (regimeBadgeEl) {
+    const consensus = summary?.consensus_regime || 'unknown';
+    regimeBadgeEl.textContent = consensus;
+    regimeBadgeEl.className = 'regime-badge ' + consensus;
+  }
+
+  // Update BTC regime
+  if (regimeBtcEl && BTC) {
+    regimeBtcEl.textContent = BTC.regime || '—';
+    regimeBtcEl.className = 'regime-value ' + (BTC.regime || '');
+  }
+  if (regimeBtcConfEl && BTC) {
+    const conf = BTC.confidence;
+    regimeBtcConfEl.textContent = conf != null ? Math.round(conf * 100) + '%' : '—';
+  }
+
+  // Update ETH regime
+  if (regimeEthEl && ETH) {
+    regimeEthEl.textContent = ETH.regime || '—';
+    regimeEthEl.className = 'regime-value ' + (ETH.regime || '');
+  }
+  if (regimeEthConfEl && ETH) {
+    const conf = ETH.confidence;
+    regimeEthConfEl.textContent = conf != null ? Math.round(conf * 100) + '%' : '—';
+  }
+
+  // Update parameter adjustments (use average or worst-case)
+  // For display, use the more conservative (volatile) regime's params
+  const btcParams = BTC?.params || {};
+  const ethParams = ETH?.params || {};
+
+  // Use minimum Kelly multiplier (more conservative)
+  const kellyAdj = Math.min(btcParams.kelly_multiplier || 1, ethParams.kelly_multiplier || 1);
+  if (regimeKellyAdjEl) {
+    regimeKellyAdjEl.textContent = (kellyAdj * 100).toFixed(0) + '%';
+    regimeKellyAdjEl.className = 'param-value' + (kellyAdj < 1 ? ' warning' : '');
+  }
+
+  // Use maximum stop multiplier (wider stops)
+  const stopAdj = Math.max(btcParams.stop_multiplier || 1, ethParams.stop_multiplier || 1);
+  if (regimeStopAdjEl) {
+    regimeStopAdjEl.textContent = stopAdj.toFixed(1) + 'x';
+    regimeStopAdjEl.className = 'param-value' + (stopAdj > 1.2 ? ' warning' : '');
+  }
+
+  // Update status footer
+  if (regimeStatusEl) {
+    const btcCandles = BTC?.candles_used || 0;
+    const ethCandles = ETH?.candles_used || 0;
+    regimeStatusEl.innerHTML = `<span class="status-text">BTC: ${btcCandles} | ETH: ${ethCandles} candles</span>`;
   }
 }
 
@@ -3830,10 +3920,12 @@ function initOverview() {
   // Initial fetches
   fetchPortfolio();
   fetchExecutionConfig();
+  fetchRegimeData();
 
   // Periodic refresh
   setInterval(fetchPortfolio, 30000); // Every 30 seconds
   setInterval(fetchExecutionConfig, 60000); // Every minute
+  setInterval(fetchRegimeData, 60000); // Every minute (regime detection)
 }
 
 // Initialize on DOMContentLoaded (runs after main init)

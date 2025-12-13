@@ -1,12 +1,11 @@
 """
 Risk Governor: Hard safety limits before live trading
 
-Phase 3f: Selection Integrity
-
 The Risk Governor provides hard safety limits that CANNOT be overridden:
 1. **Liquidation Distance Guard**: Block trades if account too close to liquidation
 2. **Daily Drawdown Kill Switch**: Halt all trading if daily loss exceeds threshold
 3. **Exposure Limits**: Prevent excessive position sizing
+4. **Circuit Breakers**: Max concurrent positions, API error pause, loss streak pause
 
 These are the LAST line of defense before capital destruction.
 
@@ -15,7 +14,7 @@ These are the LAST line of defense before capital destruction.
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import asyncpg
@@ -43,6 +42,21 @@ MAX_TOTAL_EXPOSURE_PCT = float(os.getenv("MAX_TOTAL_EXPOSURE_PCT", "0.50"))  # 5
 
 # Cooldown after kill switch triggers (seconds)
 KILL_SWITCH_COOLDOWN = int(os.getenv("KILL_SWITCH_COOLDOWN", "86400"))  # 24 hours
+
+# Phase 4.4: Circuit Breakers
+# Maximum concurrent positions across all symbols
+MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "3"))
+
+# Maximum positions per symbol (prevents concentration)
+MAX_POSITION_PER_SYMBOL = int(os.getenv("MAX_POSITION_PER_SYMBOL", "1"))
+
+# Pause trading after consecutive API errors
+API_ERROR_THRESHOLD = int(os.getenv("API_ERROR_THRESHOLD", "3"))
+API_ERROR_PAUSE_SECONDS = int(os.getenv("API_ERROR_PAUSE_SECONDS", "300"))  # 5 minutes
+
+# Maximum consecutive losing trades before pause
+MAX_CONSECUTIVE_LOSSES = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "5"))
+LOSS_STREAK_PAUSE_SECONDS = int(os.getenv("LOSS_STREAK_PAUSE_SECONDS", "3600"))  # 1 hour
 
 
 @dataclass
@@ -92,6 +106,14 @@ class RiskGovernor:
         self._kill_switch_triggered_at: Optional[datetime] = None
         self._daily_starting_equity: Optional[float] = None
         self._daily_start_date: Optional[str] = None
+
+        # Phase 4.4: Circuit breaker state
+        self._consecutive_api_errors = 0
+        self._api_pause_until: Optional[datetime] = None
+        self._consecutive_losses = 0
+        self._loss_streak_pause_until: Optional[datetime] = None
+        self._current_position_count = 0
+        self._positions_by_symbol: Dict[str, int] = {}
 
     async def load_state(self) -> None:
         """Load persisted state from database."""
@@ -466,6 +488,206 @@ class RiskGovernor:
             allowed=True,
             reason="All risk checks passed",
             risk_state=state,
+            warnings=all_warnings,
+        )
+
+    # =========================================================================
+    # Phase 4.4: Circuit Breakers
+    # =========================================================================
+
+    def check_concurrent_positions(self, current_count: int) -> RiskCheckResult:
+        """
+        Check if at maximum concurrent positions.
+
+        Args:
+            current_count: Current number of open positions
+
+        Returns:
+            RiskCheckResult
+        """
+        if current_count >= MAX_CONCURRENT_POSITIONS:
+            return RiskCheckResult(
+                allowed=False,
+                reason=f"At max concurrent positions ({current_count}/{MAX_CONCURRENT_POSITIONS})",
+            )
+
+        warnings = []
+        if current_count >= MAX_CONCURRENT_POSITIONS - 1:
+            warnings.append(f"Near position limit ({current_count}/{MAX_CONCURRENT_POSITIONS})")
+
+        return RiskCheckResult(
+            allowed=True,
+            reason="Concurrent positions OK",
+            warnings=warnings,
+        )
+
+    def check_symbol_position(self, symbol: str, has_position: bool) -> RiskCheckResult:
+        """
+        Check if already have a position in this symbol.
+
+        Args:
+            symbol: Asset symbol
+            has_position: Whether already have a position
+
+        Returns:
+            RiskCheckResult
+        """
+        if has_position and MAX_POSITION_PER_SYMBOL == 1:
+            return RiskCheckResult(
+                allowed=False,
+                reason=f"Already have position in {symbol}",
+            )
+
+        return RiskCheckResult(
+            allowed=True,
+            reason="Symbol position OK",
+        )
+
+    def report_api_error(self) -> None:
+        """
+        Report an API error. May trigger pause if too many consecutive errors.
+        """
+        self._consecutive_api_errors += 1
+
+        if self._consecutive_api_errors >= API_ERROR_THRESHOLD:
+            self._api_pause_until = (
+                datetime.now(timezone.utc) +
+                timedelta(seconds=API_ERROR_PAUSE_SECONDS)
+            )
+            print(
+                f"[risk_governor] API error pause triggered: "
+                f"{self._consecutive_api_errors} errors, paused until {self._api_pause_until}"
+            )
+
+    def report_api_success(self) -> None:
+        """Report successful API call, resetting error counter."""
+        self._consecutive_api_errors = 0
+
+    def check_api_pause(self) -> RiskCheckResult:
+        """
+        Check if in API error pause period.
+
+        Returns:
+            RiskCheckResult
+        """
+        if self._api_pause_until:
+            now = datetime.now(timezone.utc)
+            if now < self._api_pause_until:
+                remaining = (self._api_pause_until - now).total_seconds()
+                return RiskCheckResult(
+                    allowed=False,
+                    reason=f"API error pause, {remaining:.0f}s remaining",
+                )
+            # Pause expired
+            self._api_pause_until = None
+            self._consecutive_api_errors = 0
+
+        return RiskCheckResult(
+            allowed=True,
+            reason="No API pause",
+        )
+
+    def report_trade_result(self, is_win: bool) -> None:
+        """
+        Report trade result. May trigger pause if too many consecutive losses.
+
+        Args:
+            is_win: Whether the trade was profitable
+        """
+        if is_win:
+            self._consecutive_losses = 0
+        else:
+            self._consecutive_losses += 1
+
+            if self._consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
+                self._loss_streak_pause_until = (
+                    datetime.now(timezone.utc) +
+                    timedelta(seconds=LOSS_STREAK_PAUSE_SECONDS)
+                )
+                print(
+                    f"[risk_governor] Loss streak pause triggered: "
+                    f"{self._consecutive_losses} losses, paused until {self._loss_streak_pause_until}"
+                )
+
+    def check_loss_streak_pause(self) -> RiskCheckResult:
+        """
+        Check if in loss streak pause period.
+
+        Returns:
+            RiskCheckResult
+        """
+        if self._loss_streak_pause_until:
+            now = datetime.now(timezone.utc)
+            if now < self._loss_streak_pause_until:
+                remaining = (self._loss_streak_pause_until - now).total_seconds()
+                return RiskCheckResult(
+                    allowed=False,
+                    reason=f"Loss streak pause ({self._consecutive_losses} losses), {remaining:.0f}s remaining",
+                )
+            # Pause expired
+            self._loss_streak_pause_until = None
+            self._consecutive_losses = 0
+
+        return RiskCheckResult(
+            allowed=True,
+            reason="No loss streak pause",
+        )
+
+    def update_position_count(self, symbol: str, delta: int) -> None:
+        """
+        Update position tracking.
+
+        Args:
+            symbol: Asset symbol
+            delta: Change in position count (+1 for open, -1 for close)
+        """
+        self._current_position_count += delta
+        self._current_position_count = max(0, self._current_position_count)
+
+        current = self._positions_by_symbol.get(symbol, 0)
+        self._positions_by_symbol[symbol] = max(0, current + delta)
+
+    def run_circuit_breaker_checks(
+        self,
+        symbol: str,
+        has_existing_position: bool = False,
+    ) -> RiskCheckResult:
+        """
+        Run all circuit breaker checks before a trade.
+
+        Args:
+            symbol: Asset symbol to trade
+            has_existing_position: Whether already have position in this symbol
+
+        Returns:
+            RiskCheckResult with aggregated result
+        """
+        all_warnings = []
+
+        # 1. API pause check
+        api_check = self.check_api_pause()
+        if not api_check.allowed:
+            return api_check
+
+        # 2. Loss streak pause check
+        loss_check = self.check_loss_streak_pause()
+        if not loss_check.allowed:
+            return loss_check
+
+        # 3. Concurrent positions check
+        pos_check = self.check_concurrent_positions(self._current_position_count)
+        if not pos_check.allowed:
+            return pos_check
+        all_warnings.extend(pos_check.warnings)
+
+        # 4. Symbol position check
+        symbol_check = self.check_symbol_position(symbol, has_existing_position)
+        if not symbol_check.allowed:
+            return symbol_check
+
+        return RiskCheckResult(
+            allowed=True,
+            reason="Circuit breaker checks passed",
             warnings=all_warnings,
         )
 

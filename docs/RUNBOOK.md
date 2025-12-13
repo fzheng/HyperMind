@@ -281,3 +281,76 @@ docker compose exec postgres psql -U hlbot -d hlbot -c "\dt trader_corr"
 - Win rate <40%: Check signal quality
 - No signals for >4 hours: Check fills pipeline
 - ATR source = "fallback": Missing candle data
+
+---
+
+## Phase 4/5 Components
+
+### Kelly Criterion Position Sizing (hl-decide)
+
+**Purpose**: Data-driven position sizing based on trader performance.
+
+**Formula**: `f* = p - (1-p)/R` where p=win rate, R=avg_win/avg_loss
+
+**Configuration**:
+```bash
+KELLY_ENABLED=false          # Enable Kelly sizing
+KELLY_FRACTION=0.25          # Fractional Kelly (quarter Kelly)
+KELLY_MIN_EPISODES=30        # Minimum episodes for Kelly calc
+KELLY_FALLBACK_PCT=0.01      # Fallback 1% if Kelly fails
+```
+
+**Checking Kelly Status**:
+```bash
+# Check execution logs for Kelly sizing
+docker compose exec postgres psql -U hlbot -d hlbot -c \
+  "SELECT decision_id, kelly_method, kelly_position_pct FROM execution_logs ORDER BY created_at DESC LIMIT 5;"
+```
+
+### Market Regime Detection (hl-decide)
+
+**Purpose**: Adapts strategy parameters based on market conditions.
+
+**Regime Types**:
+| Regime | Detection | Strategy |
+|--------|-----------|----------|
+| TRENDING | MA spread > 2% | Wider stops, full Kelly |
+| RANGING | MAs converged | Tighter stops, 75% Kelly |
+| VOLATILE | ATR > 1.5x avg | Wide stops, 50% Kelly |
+
+**Checking Current Regime**:
+```bash
+# Via API
+curl -s http://localhost:4104/regime | jq .
+
+# Via dashboard
+# Market Regime card shows BTC/ETH regime status
+```
+
+**Configuration**:
+```bash
+REGIME_LOOKBACK_MINUTES=60
+REGIME_TREND_THRESHOLD=0.02
+REGIME_VOLATILITY_HIGH_MULT=1.5
+```
+
+### Real Execution Safety (hl-decide)
+
+**Purpose**: Guard rails for real trading (when enabled).
+
+**Safety Gates**:
+1. `REAL_EXECUTION_ENABLED=false` (env var)
+2. `hl_enabled=false` in execution_config (database)
+3. Max position limits (10% default)
+4. Daily drawdown halt (5% default)
+5. Kill switch cooldown (24h)
+
+**Checking Execution Status**:
+```bash
+# Check if execution is enabled
+docker compose exec postgres psql -U hlbot -d hlbot -c \
+  "SELECT enabled, hyperliquid FROM execution_config ORDER BY updated_at DESC LIMIT 1;"
+
+# Check recent execution attempts
+curl -s http://localhost:4104/execution/logs?limit=5 | jq .
+```

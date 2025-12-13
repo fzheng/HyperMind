@@ -58,6 +58,12 @@ from .portfolio import (
     update_execution_config,
     get_execution_logs,
 )
+from .regime import (
+    detect_market_regime,
+    get_regime_detector,
+    MarketRegime,
+    REGIME_PARAMS,
+)
 
 
 class ExecutionConfigUpdate(BaseModel):
@@ -1819,42 +1825,6 @@ async def check_episode_consensus(asset: str, episode_fills: list) -> Optional[C
     return signal
 
 
-async def process_fill_for_consensus(data: FillEvent) -> None:
-    """
-    DEPRECATED: Legacy fill-by-fill consensus detection.
-
-    This is kept for backwards compatibility but is no longer called.
-    Use process_fill_for_consensus_via_episodes instead.
-
-    Args:
-        data: FillEvent from hl-stream
-    """
-    try:
-        # Convert FillEvent to consensus Fill
-        fill = Fill(
-            fill_id=data.fill_id,
-            address=data.address,
-            asset=data.asset,
-            side=data.side,
-            size=float(data.size or 0),
-            price=float(data.price) if hasattr(data, 'price') and data.price else 0.0,
-            ts=data.ts if isinstance(data.ts, datetime) else datetime.fromisoformat(str(data.ts).replace('Z', '+00:00')),
-        )
-
-        # Update current price in detector
-        if fill.price > 0:
-            consensus_detector.set_current_price(fill.asset, fill.price)
-
-        # Process fill and check for consensus
-        signal = consensus_detector.process_fill(fill)
-
-        if signal:
-            await handle_consensus_signal(signal)
-
-    except Exception as e:
-        print(f"[hl-decide] Consensus processing error: {e}")
-
-
 async def handle_consensus_signal(signal: ConsensusSignal) -> None:
     """
     Handle a detected consensus signal.
@@ -2491,3 +2461,122 @@ async def execution_logs(limit: int = 50, offset: int = 0):
         Paginated execution logs
     """
     return await get_execution_logs(db=app.state.db, limit=limit, offset=offset)
+
+
+# ============================================================================
+# Regime Detection Endpoints
+# ============================================================================
+
+
+@app.get("/regime/{asset}")
+async def get_market_regime(asset: str):
+    """
+    Get current market regime for an asset.
+
+    Detects market regime (trending, ranging, volatile) and returns
+    recommended parameter adjustments for strategy execution.
+
+    Args:
+        asset: Asset symbol (BTC, ETH)
+
+    Returns:
+        {
+            "asset": "BTC",
+            "regime": "trending",
+            "confidence": 0.85,
+            "params": {
+                "stop_multiplier": 1.2,
+                "kelly_multiplier": 1.0,
+                "min_confidence_adjustment": 0.0,
+                "max_position_fraction": 1.0
+            },
+            "signals": {
+                "ma_spread_pct": 0.025,
+                "volatility_ratio": 1.1,
+                "price_range_pct": 0.02
+            },
+            "candles_used": 60,
+            "timestamp": "2025-12-13T00:00:00Z"
+        }
+    """
+    asset_upper = asset.upper()
+    if asset_upper not in ("BTC", "ETH"):
+        return {"error": f"Unsupported asset: {asset}. Use BTC or ETH."}
+
+    analysis = await detect_market_regime(asset_upper, db=app.state.db)
+    return analysis.to_dict()
+
+
+@app.get("/regime")
+async def get_all_regimes():
+    """
+    Get market regimes for all tracked assets.
+
+    Returns regimes for BTC and ETH.
+
+    Returns:
+        {
+            "BTC": { regime analysis },
+            "ETH": { regime analysis },
+            "summary": {
+                "consensus_regime": "volatile" | "mixed",
+                "assets_volatile": 0,
+                "assets_trending": 1,
+                "assets_ranging": 1
+            }
+        }
+    """
+    btc_analysis = await detect_market_regime("BTC", db=app.state.db)
+    eth_analysis = await detect_market_regime("ETH", db=app.state.db)
+
+    # Calculate consensus regime
+    regimes = [btc_analysis.regime, eth_analysis.regime]
+    regime_counts = {
+        "volatile": sum(1 for r in regimes if r == MarketRegime.VOLATILE),
+        "trending": sum(1 for r in regimes if r == MarketRegime.TRENDING),
+        "ranging": sum(1 for r in regimes if r == MarketRegime.RANGING),
+        "unknown": sum(1 for r in regimes if r == MarketRegime.UNKNOWN),
+    }
+
+    # Consensus: if any volatile, overall is volatile; otherwise majority wins
+    if regime_counts["volatile"] > 0:
+        consensus = "volatile"
+    elif regime_counts["trending"] > regime_counts["ranging"]:
+        consensus = "trending"
+    elif regime_counts["ranging"] > regime_counts["trending"]:
+        consensus = "ranging"
+    else:
+        consensus = "mixed"
+
+    return {
+        "BTC": btc_analysis.to_dict(),
+        "ETH": eth_analysis.to_dict(),
+        "summary": {
+            "consensus_regime": consensus,
+            "assets_volatile": regime_counts["volatile"],
+            "assets_trending": regime_counts["trending"],
+            "assets_ranging": regime_counts["ranging"],
+        },
+    }
+
+
+@app.get("/regime/params")
+async def get_regime_params():
+    """
+    Get regime parameter presets.
+
+    Shows the strategy parameter adjustments for each regime type.
+
+    Returns:
+        Parameter presets for all regime types
+    """
+    return {
+        regime.value: {
+            "stop_multiplier": params.stop_multiplier,
+            "kelly_multiplier": params.kelly_multiplier,
+            "min_confidence_adjustment": params.min_confidence_adjustment,
+            "max_position_fraction": params.max_position_fraction,
+            "description": params.description,
+        }
+        for regime, params in REGIME_PARAMS.items()
+    }
