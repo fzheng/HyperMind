@@ -1,7 +1,7 @@
 """
-Hyperliquid Trade Executor
+Multi-Exchange Trade Executor
 
-Executes trades on Hyperliquid when consensus signals fire.
+Executes trades on configured exchanges when consensus signals fire.
 Disabled by default - requires explicit configuration to enable.
 
 Features:
@@ -9,6 +9,12 @@ Features:
 - Risk governor integration for safety limits
 - Dry run mode by default (simulates execution)
 - Real execution requires explicit REAL_EXECUTION_ENABLED=true
+- Multi-exchange support via ExchangeManager (Phase 6)
+
+Supported Exchanges:
+- Hyperliquid (DEX) - default
+- Aster (DEX)
+- Bybit (CEX)
 
 @module executor
 """
@@ -31,6 +37,14 @@ from .kelly import (
     KELLY_FRACTION,
     KELLY_MIN_EPISODES,
     KELLY_FALLBACK_PCT,
+)
+from .exchanges import (
+    ExchangeType,
+    ExchangeManager,
+    OrderParams,
+    OrderResult as ExchangeOrderResult,
+    OrderSide,
+    get_exchange_manager,
 )
 
 
@@ -482,23 +496,57 @@ class HyperliquidExecutor:
             return result
 
         # Check if real execution is enabled
-        from .hl_exchange import get_exchange, REAL_EXECUTION_ENABLED
+        from .hl_exchange import REAL_EXECUTION_ENABLED
 
         if REAL_EXECUTION_ENABLED:
             # REAL EXECUTION PATH
             # Note: Circuit breaker check already done in validate_execution()
-            exchange = get_exchange()
-            if exchange.can_execute:
+
+            # Get exchange type from config (default: Hyperliquid for backward compatibility)
+            exchange_type_str = config.get("exchange", "hyperliquid").lower()
+            try:
+                exchange_type = ExchangeType(exchange_type_str)
+            except ValueError:
+                exchange_type = ExchangeType.HYPERLIQUID
+
+            # Use ExchangeManager for multi-exchange support
+            exchange_manager = get_exchange_manager()
+            exchange = exchange_manager.get_exchange(exchange_type)
+
+            # Fall back to legacy hl_exchange if manager not initialized
+            if exchange is None:
+                from .hl_exchange import get_exchange as get_hl_exchange
+                legacy_exchange = get_hl_exchange()
+                if not legacy_exchange.can_execute:
+                    exchange = None
+
+            if exchange is not None and exchange.is_connected:
                 try:
-                    from .hl_exchange import execute_market_order
                     is_buy = (direction == "long")
                     size_coin = context.get("size_coin", 0)
+                    stop_price = None
+                    take_profit_price = None
 
-                    order_result = await execute_market_order(
-                        asset=symbol,
-                        is_buy=is_buy,
+                    # Calculate stop/take profit if stop_distance provided
+                    mid_price = context.get("price", 0)
+                    if mid_price and stop_distance_pct:
+                        if direction == "long":
+                            stop_price = mid_price * (1 - stop_distance_pct)
+                            take_profit_price = mid_price * (1 + stop_distance_pct * 2)  # 2:1 RR
+                        else:
+                            stop_price = mid_price * (1 + stop_distance_pct)
+                            take_profit_price = mid_price * (1 - stop_distance_pct * 2)
+
+                    # Create order params for exchange adapter
+                    order_params = OrderParams(
+                        symbol=symbol,
+                        side=OrderSide.BUY if is_buy else OrderSide.SELL,
                         size=size_coin,
+                        stop_loss=stop_price,
+                        take_profit=take_profit_price,
                     )
+
+                    order_result = await exchange_manager.open_position(exchange_type, order_params)
 
                     if order_result.success:
                         result = ExecutionResult(
@@ -512,6 +560,7 @@ class HyperliquidExecutor:
                         )
 
                         # Register stop with StopManager
+                        # Note: exchange tracking will be added in Phase 6.2
                         try:
                             from .stop_manager import get_stop_manager
                             stop_manager = get_stop_manager(db)
@@ -527,9 +576,10 @@ class HyperliquidExecutor:
                         except Exception as e:
                             print(f"[executor] Failed to register stop: {e}")
 
-                        print(f"[executor] FILLED {direction} {symbol}: "
+                        slippage = order_result.slippage_actual or 0
+                        print(f"[executor] FILLED {direction} {symbol} on {exchange_type.value}: "
                               f"size={order_result.fill_size:.4f} @ ${order_result.fill_price:,.2f}, "
-                              f"slippage={order_result.slippage_actual:.3f}%")
+                              f"slippage={slippage:.3f}%")
                     else:
                         result = ExecutionResult(
                             status="failed",
@@ -537,9 +587,9 @@ class HyperliquidExecutor:
                             exposure_before=context.get("exposure_before"),
                             kelly_result=kelly_result,
                         )
-                        print(f"[executor] FAILED {direction} {symbol}: {order_result.error}")
+                        print(f"[executor] FAILED {direction} {symbol} on {exchange_type.value}: {order_result.error}")
 
-                    await self._log_execution(db, decision_id, symbol, direction, config, result)
+                    await self._log_execution(db, decision_id, symbol, direction, config, result, exchange_type.value)
                     return result
 
                 except Exception as e:
@@ -551,6 +601,72 @@ class HyperliquidExecutor:
                     )
                     await self._log_execution(db, decision_id, symbol, direction, config, result)
                     return result
+            else:
+                # No exchange available - try legacy path
+                from .hl_exchange import get_exchange as get_hl_exchange, execute_market_order
+                legacy_exchange = get_hl_exchange()
+                if legacy_exchange.can_execute:
+                    try:
+                        is_buy = (direction == "long")
+                        size_coin = context.get("size_coin", 0)
+
+                        order_result = await execute_market_order(
+                            asset=symbol,
+                            is_buy=is_buy,
+                            size=size_coin,
+                        )
+
+                        if order_result.success:
+                            result = ExecutionResult(
+                                status="filled",
+                                fill_price=order_result.fill_price,
+                                fill_size=order_result.fill_size,
+                                exposure_before=context.get("exposure_before"),
+                                exposure_after=context.get("exposure_after"),
+                                position_pct=context.get("position_pct"),
+                                kelly_result=kelly_result,
+                            )
+
+                            # Register stop with StopManager
+                            try:
+                                from .stop_manager import get_stop_manager
+                                stop_manager = get_stop_manager(db)
+                                stop_pct = stop_distance_pct or 0.02
+                                await stop_manager.register_stop(
+                                    decision_id=decision_id,
+                                    symbol=symbol,
+                                    direction=direction,
+                                    entry_price=order_result.fill_price,
+                                    entry_size=order_result.fill_size,
+                                    stop_distance_pct=stop_pct,
+                                )
+                            except Exception as e:
+                                print(f"[executor] Failed to register stop: {e}")
+
+                            print(f"[executor] FILLED {direction} {symbol}: "
+                                  f"size={order_result.fill_size:.4f} @ ${order_result.fill_price:,.2f}, "
+                                  f"slippage={order_result.slippage_actual:.3f}%")
+                        else:
+                            result = ExecutionResult(
+                                status="failed",
+                                error_message=order_result.error,
+                                exposure_before=context.get("exposure_before"),
+                                kelly_result=kelly_result,
+                            )
+                            print(f"[executor] FAILED {direction} {symbol}: {order_result.error}")
+
+                        await self._log_execution(db, decision_id, symbol, direction, config, result)
+                        return result
+
+                    except Exception as e:
+                        result = ExecutionResult(
+                            status="failed",
+                            error_message=f"Execution error: {str(e)}",
+                            exposure_before=context.get("exposure_before"),
+                            kelly_result=kelly_result,
+                        )
+                        await self._log_execution(db, decision_id, symbol, direction, config, result)
+                        return result
 
         # DRY RUN PATH (default)
         result = ExecutionResult(
@@ -584,6 +700,7 @@ class HyperliquidExecutor:
         direction: str,
         config: dict[str, Any],
         result: ExecutionResult,
+        exchange: str = "hyperliquid",
     ) -> None:
         """Log execution attempt to database with Kelly sizing details."""
         try:
@@ -620,7 +737,7 @@ class HyperliquidExecutor:
                             $15, $16, $17, $18, $19, $20)
                     """,
                     decision_id,
-                    "hyperliquid",
+                    exchange,  # Now uses the provided exchange parameter
                     symbol,
                     "buy" if direction == "long" else "sell",
                     result.fill_size or 0,

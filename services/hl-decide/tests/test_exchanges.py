@@ -27,6 +27,11 @@ from app.exchanges import (
     get_exchange,
     list_available_exchanges,
     is_exchange_available,
+    ExchangeManager,
+    AggregatedBalance,
+    AggregatedPositions,
+    get_exchange_manager,
+    init_exchange_manager,
 )
 
 
@@ -498,3 +503,401 @@ class TestExchangeTypeValidation:
 
         bybit_config = ExchangeConfig(exchange_type=ExchangeType.BYBIT)
         assert BybitAdapter(bybit_config).exchange_type == ExchangeType.BYBIT
+
+
+class TestExchangeManager:
+    """Tests for ExchangeManager class."""
+
+    def test_initialization(self):
+        """Test manager initializes with empty exchange dict."""
+        manager = ExchangeManager()
+
+        assert manager.connected_exchanges == []
+        assert manager.default_exchange is None
+
+    def test_get_exchange_not_registered(self):
+        """Test getting unregistered exchange returns None."""
+        manager = ExchangeManager()
+
+        exchange = manager.get_exchange(ExchangeType.HYPERLIQUID)
+        assert exchange is None
+
+    def test_set_default_exchange_not_registered(self):
+        """Test setting default to unregistered exchange raises error."""
+        manager = ExchangeManager()
+
+        with pytest.raises(ValueError, match="not registered"):
+            manager.default_exchange = ExchangeType.HYPERLIQUID
+
+    def test_normalize_symbol(self):
+        """Test symbol normalization removes exchange suffixes."""
+        manager = ExchangeManager()
+
+        assert manager.normalize_symbol("BTC-PERP") == "BTC"
+        assert manager.normalize_symbol("BTCUSDT") == "BTC"
+        assert manager.normalize_symbol("BTC/USDT") == "BTC"  # Uppercased then /USDT stripped
+        assert manager.normalize_symbol("ETH-USD") == "ETH"
+        assert manager.normalize_symbol("BTC") == "BTC"
+
+    @pytest.mark.asyncio
+    async def test_get_balance_no_exchanges(self):
+        """Test getting balance with no exchanges returns None."""
+        manager = ExchangeManager()
+
+        balance = await manager.get_balance(ExchangeType.HYPERLIQUID)
+        assert balance is None
+
+    @pytest.mark.asyncio
+    async def test_get_positions_no_exchanges(self):
+        """Test getting positions with no exchanges returns empty list."""
+        manager = ExchangeManager()
+
+        positions = await manager.get_positions(ExchangeType.HYPERLIQUID)
+        assert positions == []
+
+    @pytest.mark.asyncio
+    async def test_execute_order_no_default(self):
+        """Test execute order fails without default exchange."""
+        manager = ExchangeManager()
+
+        result = await manager.execute_order(
+            None,
+            OrderParams(symbol="BTC", side=OrderSide.BUY, size=0.01)
+        )
+
+        assert result.success is False
+        assert "no default set" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_all_empty(self):
+        """Test disconnect all with no exchanges does nothing."""
+        manager = ExchangeManager()
+        await manager.disconnect_all()  # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_get_all_positions_empty(self):
+        """Test get all positions with no exchanges."""
+        manager = ExchangeManager()
+
+        agg = await manager.get_all_positions()
+
+        assert agg.positions == []
+        assert agg.per_exchange == {}
+        assert agg.total_notional == 0.0
+
+    @pytest.mark.asyncio
+    async def test_get_aggregated_balance_empty(self):
+        """Test aggregated balance with no exchanges."""
+        manager = ExchangeManager()
+
+        balance = await manager.get_aggregated_balance()
+        assert balance is None
+
+    @pytest.mark.asyncio
+    async def test_close_position_no_default(self):
+        """Test close position fails without default exchange."""
+        manager = ExchangeManager()
+
+        result = await manager.close_position("BTC")
+
+        assert result.success is False
+        assert "no default set" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_set_leverage_no_default(self):
+        """Test set leverage fails without default exchange."""
+        manager = ExchangeManager()
+
+        result = await manager.set_leverage("BTC", 5)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_get_market_price_no_default(self):
+        """Test get market price without default exchange."""
+        manager = ExchangeManager()
+
+        price = await manager.get_market_price("BTC")
+        assert price is None
+
+
+class TestExchangeManagerWithMockedExchange:
+    """Tests for ExchangeManager with mocked exchange adapters."""
+
+    @pytest.fixture
+    def mock_exchange(self):
+        """Create a mock exchange adapter."""
+        mock = MagicMock(spec=ExchangeInterface)
+        mock.is_connected = True
+        mock.is_configured = True
+        mock.exchange_type = ExchangeType.HYPERLIQUID
+        mock.config = ExchangeConfig(exchange_type=ExchangeType.HYPERLIQUID)
+        return mock
+
+    @pytest.mark.asyncio
+    async def test_connect_exchange_mocked(self, mock_exchange):
+        """Test connecting exchange with mocked adapter."""
+        manager = ExchangeManager()
+
+        # Mock the factory
+        with patch("app.exchanges.manager.get_exchange", return_value=mock_exchange):
+            mock_exchange.connect = AsyncMock(return_value=True)
+
+            result = await manager.connect_exchange(ExchangeType.HYPERLIQUID)
+
+            assert result is True
+            assert ExchangeType.HYPERLIQUID in manager.connected_exchanges
+            assert manager.default_exchange == ExchangeType.HYPERLIQUID
+
+    @pytest.mark.asyncio
+    async def test_get_balance_mocked(self, mock_exchange):
+        """Test getting balance with mocked adapter."""
+        manager = ExchangeManager()
+        manager._exchanges[ExchangeType.HYPERLIQUID] = mock_exchange
+        manager._default_exchange = ExchangeType.HYPERLIQUID
+
+        test_balance = Balance(
+            total_equity=10000.0,
+            available_balance=8000.0,
+            margin_used=2000.0,
+        )
+        mock_exchange.get_balance = AsyncMock(return_value=test_balance)
+
+        balance = await manager.get_balance(ExchangeType.HYPERLIQUID)
+
+        assert balance is not None
+        assert balance.total_equity == 10000.0
+
+    @pytest.mark.asyncio
+    async def test_get_positions_mocked(self, mock_exchange):
+        """Test getting positions with mocked adapter."""
+        manager = ExchangeManager()
+        manager._exchanges[ExchangeType.HYPERLIQUID] = mock_exchange
+
+        test_positions = [
+            Position(
+                symbol="BTC",
+                side=PositionSide.LONG,
+                size=0.5,
+                entry_price=50000.0,
+                mark_price=51000.0,
+            )
+        ]
+        mock_exchange.get_positions = AsyncMock(return_value=test_positions)
+
+        positions = await manager.get_positions(ExchangeType.HYPERLIQUID)
+
+        assert len(positions) == 1
+        assert positions[0].symbol == "BTC"
+
+    @pytest.mark.asyncio
+    async def test_execute_order_mocked(self, mock_exchange):
+        """Test executing order with mocked adapter."""
+        manager = ExchangeManager()
+        manager._exchanges[ExchangeType.HYPERLIQUID] = mock_exchange
+        manager._default_exchange = ExchangeType.HYPERLIQUID
+
+        test_result = OrderResult(
+            success=True,
+            order_id="12345",
+            fill_price=50000.0,
+            fill_size=0.1,
+            status="filled",
+        )
+        mock_exchange.place_order = AsyncMock(return_value=test_result)
+
+        result = await manager.execute_order(
+            ExchangeType.HYPERLIQUID,
+            OrderParams(symbol="BTC", side=OrderSide.BUY, size=0.1)
+        )
+
+        assert result.success is True
+        assert result.order_id == "12345"
+
+    @pytest.mark.asyncio
+    async def test_aggregated_balance_mocked(self, mock_exchange):
+        """Test aggregated balance across exchanges."""
+        manager = ExchangeManager()
+        manager._exchanges[ExchangeType.HYPERLIQUID] = mock_exchange
+
+        test_balance = Balance(
+            total_equity=10000.0,
+            available_balance=8000.0,
+            margin_used=2000.0,
+            unrealized_pnl=500.0,
+        )
+        mock_exchange.get_balance = AsyncMock(return_value=test_balance)
+
+        agg = await manager.get_aggregated_balance()
+
+        assert agg is not None
+        assert agg.total_equity == 10000.0
+        assert agg.available_balance == 8000.0
+        assert "hyperliquid" in agg.per_exchange
+
+    @pytest.mark.asyncio
+    async def test_aggregated_positions_mocked(self, mock_exchange):
+        """Test aggregated positions across exchanges."""
+        manager = ExchangeManager()
+        manager._exchanges[ExchangeType.HYPERLIQUID] = mock_exchange
+
+        test_positions = [
+            Position(
+                symbol="BTC",
+                side=PositionSide.LONG,
+                size=0.5,
+                entry_price=50000.0,
+                mark_price=51000.0,
+            )
+        ]
+        mock_exchange.get_positions = AsyncMock(return_value=test_positions)
+
+        agg = await manager.get_all_positions()
+
+        assert len(agg.positions) == 1
+        assert agg.total_notional == 0.5 * 51000.0
+        assert "hyperliquid" in agg.per_exchange
+
+    @pytest.mark.asyncio
+    async def test_disconnect_exchange(self, mock_exchange):
+        """Test disconnecting an exchange."""
+        manager = ExchangeManager()
+        manager._exchanges[ExchangeType.HYPERLIQUID] = mock_exchange
+        manager._default_exchange = ExchangeType.HYPERLIQUID
+
+        mock_exchange.disconnect = AsyncMock()
+
+        await manager.disconnect_exchange(ExchangeType.HYPERLIQUID)
+
+        assert ExchangeType.HYPERLIQUID not in manager._exchanges
+        assert manager.default_exchange is None
+
+    @pytest.mark.asyncio
+    async def test_format_symbol_with_exchange(self, mock_exchange):
+        """Test symbol formatting delegates to exchange."""
+        manager = ExchangeManager()
+        manager._exchanges[ExchangeType.HYPERLIQUID] = mock_exchange
+        manager._default_exchange = ExchangeType.HYPERLIQUID
+
+        mock_exchange.format_symbol = MagicMock(return_value="BTC")
+
+        result = manager.format_symbol("btc", ExchangeType.HYPERLIQUID)
+
+        assert result == "BTC"
+        mock_exchange.format_symbol.assert_called_once_with("btc")
+
+    @pytest.mark.asyncio
+    async def test_open_position_mocked(self, mock_exchange):
+        """Test opening position with mocked adapter."""
+        manager = ExchangeManager()
+        manager._exchanges[ExchangeType.HYPERLIQUID] = mock_exchange
+        manager._default_exchange = ExchangeType.HYPERLIQUID
+
+        test_result = OrderResult(
+            success=True,
+            order_id="open_123",
+            fill_price=50000.0,
+            fill_size=0.1,
+            status="filled",
+        )
+        mock_exchange.open_position = AsyncMock(return_value=test_result)
+
+        result = await manager.open_position(
+            ExchangeType.HYPERLIQUID,
+            OrderParams(symbol="BTC", side=OrderSide.BUY, size=0.1)
+        )
+
+        assert result.success is True
+        assert result.order_id == "open_123"
+
+    @pytest.mark.asyncio
+    async def test_close_position_mocked(self, mock_exchange):
+        """Test closing position with mocked adapter."""
+        manager = ExchangeManager()
+        manager._exchanges[ExchangeType.HYPERLIQUID] = mock_exchange
+        manager._default_exchange = ExchangeType.HYPERLIQUID
+
+        test_result = OrderResult(
+            success=True,
+            order_id="close_123",
+            fill_price=50500.0,
+            fill_size=0.1,
+            status="filled",
+        )
+        mock_exchange.close_position = AsyncMock(return_value=test_result)
+
+        result = await manager.close_position("BTC")
+
+        assert result.success is True
+        mock_exchange.close_position.assert_called_once_with("BTC", None)
+
+    @pytest.mark.asyncio
+    async def test_set_stop_loss_mocked(self, mock_exchange):
+        """Test setting stop loss with mocked adapter."""
+        manager = ExchangeManager()
+        manager._exchanges[ExchangeType.HYPERLIQUID] = mock_exchange
+        manager._default_exchange = ExchangeType.HYPERLIQUID
+
+        test_result = OrderResult(
+            success=True,
+            order_id="sl_123",
+            status="pending",
+        )
+        mock_exchange.set_stop_loss = AsyncMock(return_value=test_result)
+
+        result = await manager.set_stop_loss("BTC", 48000.0)
+
+        assert result.success is True
+        mock_exchange.set_stop_loss.assert_called_once_with("BTC", 48000.0, None)
+
+    @pytest.mark.asyncio
+    async def test_set_take_profit_mocked(self, mock_exchange):
+        """Test setting take profit with mocked adapter."""
+        manager = ExchangeManager()
+        manager._exchanges[ExchangeType.HYPERLIQUID] = mock_exchange
+        manager._default_exchange = ExchangeType.HYPERLIQUID
+
+        test_result = OrderResult(
+            success=True,
+            order_id="tp_123",
+            status="pending",
+        )
+        mock_exchange.set_take_profit = AsyncMock(return_value=test_result)
+
+        result = await manager.set_take_profit("BTC", 55000.0)
+
+        assert result.success is True
+        mock_exchange.set_take_profit.assert_called_once_with("BTC", 55000.0, None)
+
+
+class TestExchangeManagerSingleton:
+    """Tests for ExchangeManager singleton and initialization."""
+
+    def test_get_exchange_manager_returns_same_instance(self):
+        """Test get_exchange_manager returns singleton."""
+        # Reset singleton for test
+        import app.exchanges.manager as manager_module
+        manager_module._exchange_manager = None
+
+        m1 = get_exchange_manager()
+        m2 = get_exchange_manager()
+
+        assert m1 is m2
+
+        # Cleanup
+        manager_module._exchange_manager = None
+
+    @pytest.mark.asyncio
+    async def test_init_exchange_manager_no_credentials(self):
+        """Test init_exchange_manager with no credentials configured."""
+        import app.exchanges.manager as manager_module
+        manager_module._exchange_manager = None
+
+        # Ensure no credentials are set
+        with patch.dict(os.environ, {}, clear=True):
+            manager = await init_exchange_manager(testnet=True)
+
+            # Without credentials, no exchanges should connect
+            assert manager.connected_exchanges == []
+
+        # Cleanup
+        manager_module._exchange_manager = None

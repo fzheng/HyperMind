@@ -38,6 +38,13 @@ from .factory import (
     is_exchange_available,
     connect_exchange,
 )
+from .manager import (
+    ExchangeManager,
+    AggregatedBalance,
+    AggregatedPositions,
+    get_exchange_manager,
+    init_exchange_manager,
+)
 
 __all__ = [
     # Interface
@@ -61,4 +68,10 @@ __all__ = [
     "list_available_exchanges",
     "is_exchange_available",
     "connect_exchange",
+    # Manager
+    "ExchangeManager",
+    "AggregatedBalance",
+    "AggregatedPositions",
+    "get_exchange_manager",
+    "init_exchange_manager",
 ]

@@ -6,6 +6,7 @@ The Risk Governor provides hard safety limits that CANNOT be overridden:
 2. **Daily Drawdown Kill Switch**: Halt all trading if daily loss exceeds threshold
 3. **Exposure Limits**: Prevent excessive position sizing
 4. **Circuit Breakers**: Max concurrent positions, API error pause, loss streak pause
+5. **Multi-Exchange Support**: Aggregated risk tracking across exchanges (Phase 6)
 
 These are the LAST line of defense before capital destruction.
 
@@ -71,6 +72,19 @@ class RiskState:
     daily_pnl: float
     daily_starting_equity: float
     daily_drawdown_pct: float
+    exchange: str = "hyperliquid"  # Phase 6: track which exchange this state is from
+
+
+@dataclass
+class AggregatedRiskState:
+    """Aggregated risk state across all connected exchanges (Phase 6)."""
+    timestamp: datetime
+    total_equity: float
+    total_margin_used: float
+    total_exposure: float
+    per_exchange: dict  # exchange -> RiskState
+    daily_pnl: float
+    daily_drawdown_pct: float
 
 
 @dataclass
@@ -114,6 +128,10 @@ class RiskGovernor:
         self._loss_streak_pause_until: Optional[datetime] = None
         self._current_position_count = 0
         self._positions_by_symbol: Dict[str, int] = {}
+
+        # Phase 6: Multi-exchange tracking
+        self._positions_by_exchange: Dict[str, Dict[str, int]] = {}  # exchange -> {symbol: count}
+        self._risk_state_by_exchange: Dict[str, RiskState] = {}
 
     async def load_state(self) -> None:
         """Load persisted state from database."""
@@ -670,15 +688,20 @@ class RiskGovernor:
         current = self._positions_by_symbol.get(symbol, 0)
         self._positions_by_symbol[symbol] = max(0, current + delta)
 
-    def update_positions_from_account_state(self, account_state: Dict[str, Any]) -> None:
+    def update_positions_from_account_state(
+        self,
+        account_state: Dict[str, Any],
+        exchange: str = "hyperliquid",
+    ) -> None:
         """
-        Update position tracking from Hyperliquid account state.
+        Update position tracking from exchange account state.
 
         Derives per-symbol position counts from assetPositions array.
         This is the preferred method to sync governor state with actual positions.
 
         Args:
-            account_state: Account state from Hyperliquid API containing assetPositions
+            account_state: Account state from exchange API containing assetPositions
+            exchange: Exchange identifier (hyperliquid, aster, bybit)
         """
         positions_by_symbol: Dict[str, int] = {}
 
@@ -689,8 +712,93 @@ class RiskGovernor:
             if size != 0 and coin:
                 positions_by_symbol[coin] = positions_by_symbol.get(coin, 0) + 1
 
-        self._current_position_count = sum(positions_by_symbol.values())
-        self._positions_by_symbol = positions_by_symbol
+        # Phase 6: Track per-exchange positions
+        self._positions_by_exchange[exchange] = positions_by_symbol
+
+        # Update aggregated totals
+        self._update_aggregated_positions()
+
+    def _update_aggregated_positions(self) -> None:
+        """Update aggregated position counts from per-exchange data."""
+        aggregated: Dict[str, int] = {}
+
+        for exchange_positions in self._positions_by_exchange.values():
+            for symbol, count in exchange_positions.items():
+                aggregated[symbol] = aggregated.get(symbol, 0) + count
+
+        self._positions_by_symbol = aggregated
+        self._current_position_count = sum(aggregated.values())
+
+    def update_risk_state_for_exchange(
+        self,
+        exchange: str,
+        account_value: float,
+        margin_used: float,
+        maintenance_margin: float,
+        total_exposure: float,
+        daily_pnl: float,
+    ) -> RiskState:
+        """
+        Update risk state for a specific exchange.
+
+        Args:
+            exchange: Exchange identifier
+            account_value: Current account equity
+            margin_used: Currently used margin
+            maintenance_margin: Minimum required margin
+            total_exposure: Total notional exposure
+            daily_pnl: Today's PnL
+
+        Returns:
+            RiskState for this exchange
+        """
+        state = self.compute_risk_state(
+            account_value, margin_used, maintenance_margin, total_exposure, daily_pnl
+        )
+        state.exchange = exchange
+        self._risk_state_by_exchange[exchange] = state
+        return state
+
+    def get_aggregated_risk_state(self) -> Optional[AggregatedRiskState]:
+        """
+        Get aggregated risk state across all exchanges.
+
+        Returns:
+            AggregatedRiskState or None if no exchange data available
+        """
+        if not self._risk_state_by_exchange:
+            return None
+
+        total_equity = sum(s.account_value for s in self._risk_state_by_exchange.values())
+        total_margin = sum(s.margin_used for s in self._risk_state_by_exchange.values())
+        total_exposure = sum(s.total_exposure for s in self._risk_state_by_exchange.values())
+        daily_pnl = sum(s.daily_pnl for s in self._risk_state_by_exchange.values())
+
+        # Calculate aggregated drawdown
+        starting = self._daily_starting_equity or total_equity
+        daily_drawdown_pct = -daily_pnl / starting if starting > 0 and daily_pnl < 0 else 0
+
+        return AggregatedRiskState(
+            timestamp=datetime.now(timezone.utc),
+            total_equity=total_equity,
+            total_margin_used=total_margin,
+            total_exposure=total_exposure,
+            per_exchange=dict(self._risk_state_by_exchange),
+            daily_pnl=daily_pnl,
+            daily_drawdown_pct=daily_drawdown_pct,
+        )
+
+    def get_positions_for_exchange(self, exchange: str) -> Dict[str, int]:
+        """
+        Get position counts for a specific exchange.
+
+        Args:
+            exchange: Exchange identifier
+
+        Returns:
+            Dict of symbol -> position count
+        """
+        return self._positions_by_exchange.get(exchange, {})
 
     def get_symbol_position_count(self, symbol: str) -> int:
         """
