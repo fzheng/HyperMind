@@ -410,6 +410,60 @@ Signal generation and consensus detection (Python/FastAPI).
 | `volatile` | ATR ratio > 1.5x | Wide stops (1.5x), 50% Kelly |
 | `unknown` | Insufficient data | Conservative defaults |
 
+### Multi-Exchange Module (Phase 6)
+
+The exchange module provides a unified interface for trading across multiple exchanges. Currently not exposed as REST API - used internally by executor.
+
+**Python Usage:**
+```python
+from app.exchanges import (
+    get_exchange,
+    connect_exchange,
+    ExchangeType,
+    OrderParams,
+    OrderSide,
+)
+
+# Create and connect to exchange
+exchange = await connect_exchange(ExchangeType.HYPERLIQUID, testnet=True)
+
+# Get account state
+balance = await exchange.get_balance()
+positions = await exchange.get_positions()
+
+# Place order with stops
+result = await exchange.open_position(
+    OrderParams(
+        symbol="BTC",
+        side=OrderSide.BUY,
+        size=0.01,
+        stop_loss=49000.0,
+        take_profit=52000.0,
+    )
+)
+
+await exchange.disconnect()
+```
+
+**Supported Exchanges:**
+| Exchange | Type | SDK | Symbol Format |
+|----------|------|-----|---------------|
+| Hyperliquid | DEX | hyperliquid-python-sdk | `BTC`, `ETH` |
+| Aster | DEX | ECDSA/EIP-712 | `BTC-PERP`, `ETH-PERP` |
+| Bybit | CEX | pybit | `BTCUSDT`, `ETHUSDT` |
+
+**Interface Operations:**
+| Operation | Description |
+|-----------|-------------|
+| `connect()` / `disconnect()` | Connection lifecycle |
+| `get_balance()` | Account equity, margin, P&L |
+| `get_positions()` | Open positions with entry/mark prices |
+| `open_position()` | Market/limit orders with stops |
+| `close_position()` | Partial or full close |
+| `set_leverage()` | Leverage configuration |
+| `set_stop_loss()` / `set_take_profit()` | Position protection |
+| `get_market_price()` | Current mid price |
+
 ---
 
 ## NATS Message Topics

@@ -26,7 +26,7 @@ A collective intelligence trading system that learns from top Hyperliquid trader
 
 ---
 
-## Current State: Phase 4-5 Complete
+## Current State: Phase 6 In Progress
 
 ### What's Working
 
@@ -36,17 +36,32 @@ Leaderboard → Quality Filter → Alpha Pool → Thompson Sampling → Consensu
    1000+          7 gates         50 traders      NIG posterior       5 gates    Kelly sized
 ```
 
+**Multi-Exchange Support (Phase 6):**
+```
+                    ┌─────────────────────┐
+                    │  ExchangeInterface  │
+                    │    (Abstract ABC)   │
+                    └──────────┬──────────┘
+           ┌───────────────────┼───────────────────┐
+           ▼                   ▼                   ▼
+   ┌───────────────┐   ┌───────────────┐   ┌───────────────┐
+   │  Hyperliquid  │   │   Aster DEX   │   │    Bybit      │
+   │    Adapter    │   │    Adapter    │   │   Adapter     │
+   └───────────────┘   └───────────────┘   └───────────────┘
+         DEX                 DEX                 CEX
+```
+
 **Services:**
 | Service | Port | Function |
 |---------|------|----------|
 | hl-scout | 4101 | Leaderboard scanning, candidate publishing |
 | hl-stream | 4102 | Real-time feeds, dashboard, WebSocket |
 | hl-sage | 4103 | NIG model, Thompson Sampling selection |
-| hl-decide | 4104 | Consensus detection, episode tracking, execution |
+| hl-decide | 4104 | Consensus detection, episode tracking, multi-exchange execution |
 
 **Test Coverage:**
 - TypeScript: 1,035 unit tests (28 test suites)
-- Python: 348 tests (hl-sage + hl-decide including Kelly, regime, exchange tests)
+- Python: 418 tests (hl-sage + hl-decide including Kelly, regime, exchange adapters)
 - E2E: 220 Playwright tests (6 spec files)
 
 ### Phase 3c Additions (December 2025)
