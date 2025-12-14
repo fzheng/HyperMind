@@ -632,6 +632,36 @@ class TestATRToConsensusFlow:
         assert detector.get_stop_fraction("BTC") == 0.01
         assert detector.get_stop_fraction("ETH") == 0.01
 
+    def test_consensus_detector_initializes_with_target_exchange(self):
+        """Detector should accept target exchange for fee calculation."""
+        # Default is hyperliquid
+        detector = ConsensusDetector()
+        assert detector.target_exchange == "hyperliquid"
+
+        # Can set to other exchanges
+        detector = ConsensusDetector(target_exchange="bybit")
+        assert detector.target_exchange == "bybit"
+
+        detector = ConsensusDetector(target_exchange="ASTER")  # Case insensitive
+        assert detector.target_exchange == "aster"
+
+    def test_consensus_detector_set_target_exchange(self):
+        """Can change target exchange at runtime."""
+        from app.consensus import get_exchange_fees_bps
+        detector = ConsensusDetector()
+
+        # Initially hyperliquid
+        assert detector.target_exchange == "hyperliquid"
+
+        # Change to bybit
+        detector.set_target_exchange("bybit")
+        assert detector.target_exchange == "bybit"
+
+        # Verify fee lookup works
+        assert get_exchange_fees_bps("hyperliquid") == 10.0  # 5 bps × 2
+        assert get_exchange_fees_bps("bybit") == 12.0  # 6 bps × 2
+        assert get_exchange_fees_bps("aster") == 10.0
+
     def test_atr_updates_detector_stop(self):
         """ATR provider updates should reflect in detector."""
         provider = ATRProvider()
@@ -1810,7 +1840,7 @@ class TestFailClosedBehavior:
 
         # Mock get_account_state to fail twice then succeed
         call_count = 0
-        async def mock_get_account_state():
+        async def mock_get_account_state(exchange_type=None):
             nonlocal call_count
             call_count += 1
             if call_count < 3:
@@ -1895,7 +1925,7 @@ class TestFailClosedBehavior:
 
         # Mock get_account_state to always return None
         call_count = 0
-        async def mock_get_account_state():
+        async def mock_get_account_state(exchange_type=None):
             nonlocal call_count
             call_count += 1
             return None
@@ -1918,7 +1948,7 @@ class TestFailClosedBehavior:
         executor.address = "0x1234567890123456789012345678901234567890"
 
         call_count = 0
-        async def mock_get_account_state():
+        async def mock_get_account_state(exchange_type=None):
             nonlocal call_count
             call_count += 1
             return {"marginSummary": {"accountValue": "100000"}, "assetPositions": []}

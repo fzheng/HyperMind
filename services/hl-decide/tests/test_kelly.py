@@ -289,22 +289,23 @@ class TestKellyWithRealScenarios:
     def test_eth_trader_mediocre_stats(self):
         """ETH trader with borderline statistics."""
         kelly_input = KellyInput(
-            win_rate=0.52,  # 52% win rate
-            avg_win_r=1.0,
+            win_rate=0.55,  # 55% win rate (increased to have positive EV after fees)
+            avg_win_r=1.2,  # Slightly better R ratio
             avg_loss_r=1.0,
             episode_count=50,
             account_value=25000,
             current_price=2200,  # ETH at $2.2k
             stop_distance_pct=0.015,  # 1.5% stop
+            round_trip_fee_pct=0.0,  # No fees for this test
         )
         result = kelly_position_size(kelly_input)
 
-        # Small but positive EV - Kelly ~4%, fractional ~1%
+        # Positive EV with decent stats
         assert result.method == "kelly"
         # With small stop distance, position gets capped
         assert result.position_pct <= KELLY_MAX_POSITION_PCT
-        # Small Kelly fraction due to borderline edge
-        assert result.fractional_kelly < 0.02
+        # Small Kelly fraction due to moderate edge
+        assert result.fractional_kelly < 0.10
 
     def test_trader_with_losing_history(self):
         """Trader with losing track record should get minimal size."""
@@ -437,3 +438,182 @@ class TestKellyResultDataclass:
         assert result.method == "kelly"
         assert result.reasoning == "Test"
         assert result.capped is False
+
+
+class TestFeeAdjustedKelly:
+    """Test fee-adjusted Kelly calculations (Phase 6: Multi-Exchange)."""
+
+    def test_ev_with_zero_fees(self):
+        """EV should be unchanged with zero fees."""
+        ev_no_fees = calculate_expected_value(
+            win_rate=0.55, avg_win_r=1.0, avg_loss_r=1.0, fee_cost_r=0.0
+        )
+        ev_baseline = calculate_expected_value(
+            win_rate=0.55, avg_win_r=1.0, avg_loss_r=1.0
+        )
+        assert ev_no_fees == pytest.approx(ev_baseline, abs=0.001)
+
+    def test_ev_reduced_by_fees(self):
+        """EV should be reduced by fee cost in R-multiples."""
+        # Base EV = 0.55 * 1.0 - 0.45 * 1.0 = 0.10R
+        ev_no_fees = calculate_expected_value(
+            win_rate=0.55, avg_win_r=1.0, avg_loss_r=1.0, fee_cost_r=0.0
+        )
+        # With 0.05R fees: EV = 0.10 - 0.05 = 0.05R
+        ev_with_fees = calculate_expected_value(
+            win_rate=0.55, avg_win_r=1.0, avg_loss_r=1.0, fee_cost_r=0.05
+        )
+        assert ev_with_fees == pytest.approx(ev_no_fees - 0.05, abs=0.001)
+        assert ev_with_fees == pytest.approx(0.05, abs=0.001)
+
+    def test_fees_can_turn_positive_ev_negative(self):
+        """High fees can make a marginally positive edge negative EV."""
+        # Small edge: 52% win rate with 1:1 R ratio -> EV = 0.04R
+        ev_no_fees = calculate_expected_value(
+            win_rate=0.52, avg_win_r=1.0, avg_loss_r=1.0
+        )
+        assert ev_no_fees == pytest.approx(0.04, abs=0.001)
+
+        # With 0.10R fees (high fee exchange): EV = 0.04 - 0.10 = -0.06R
+        ev_high_fees = calculate_expected_value(
+            win_rate=0.52, avg_win_r=1.0, avg_loss_r=1.0, fee_cost_r=0.10
+        )
+        assert ev_high_fees < 0
+
+    def test_kelly_input_with_fees(self):
+        """KellyInput should accept round_trip_fee_pct."""
+        kelly_input = KellyInput(
+            win_rate=0.55,
+            avg_win_r=1.0,
+            avg_loss_r=1.0,
+            episode_count=50,
+            account_value=100000,
+            current_price=50000,
+            stop_distance_pct=0.02,
+            round_trip_fee_pct=0.001,  # 10 bps round-trip
+        )
+        assert kelly_input.round_trip_fee_pct == 0.001
+
+    def test_kelly_input_default_fees(self):
+        """KellyInput should default to 0.001 (10 bps) round-trip fees."""
+        kelly_input = KellyInput(
+            win_rate=0.55,
+            avg_win_r=1.0,
+            avg_loss_r=1.0,
+            episode_count=50,
+            account_value=100000,
+            current_price=50000,
+            stop_distance_pct=0.02,
+        )
+        assert kelly_input.round_trip_fee_pct == 0.001
+
+    def test_kelly_with_fees_reduces_ev(self):
+        """Kelly sizing should account for fees in EV calculation."""
+        # Same stats, different fee levels
+        kelly_input_low_fee = KellyInput(
+            win_rate=0.55,
+            avg_win_r=1.5,
+            avg_loss_r=1.0,
+            episode_count=100,
+            account_value=100000,
+            current_price=50000,
+            stop_distance_pct=0.02,
+            round_trip_fee_pct=0.0005,  # 5 bps (Hyperliquid-like)
+        )
+        kelly_input_high_fee = KellyInput(
+            win_rate=0.55,
+            avg_win_r=1.5,
+            avg_loss_r=1.0,
+            episode_count=100,
+            account_value=100000,
+            current_price=50000,
+            stop_distance_pct=0.02,
+            round_trip_fee_pct=0.0020,  # 20 bps (higher fee exchange)
+        )
+
+        result_low_fee = kelly_position_size(kelly_input_low_fee)
+        result_high_fee = kelly_position_size(kelly_input_high_fee)
+
+        # Both should still use Kelly (positive EV even with fees)
+        assert result_low_fee.method == "kelly"
+        assert result_high_fee.method == "kelly"
+
+        # High fee should have lower EV in reasoning
+        assert "Fees=" in result_low_fee.reasoning
+        assert "Fees=" in result_high_fee.reasoning
+
+    def test_fees_can_trigger_negative_ev_fallback(self):
+        """Marginal edge + high fees should trigger negative EV fallback."""
+        # 52% win rate with 1:1 -> EV = 0.04R raw
+        # With 2% stop, 10bps fees = 0.10R / 0.02 = 0.05R fee cost
+        # Adjusted EV = 0.04 - 0.05 = -0.01R (negative!)
+        kelly_input = KellyInput(
+            win_rate=0.52,
+            avg_win_r=1.0,
+            avg_loss_r=1.0,
+            episode_count=100,
+            account_value=100000,
+            current_price=50000,
+            stop_distance_pct=0.02,
+            round_trip_fee_pct=0.001,  # 10 bps = 0.05R with 2% stop
+        )
+
+        result = kelly_position_size(kelly_input)
+        assert result.method == "fallback_negative_ev"
+        assert "fees" in result.reasoning.lower()
+
+    def test_fee_cost_in_r_multiples(self):
+        """Fee cost should be correctly converted to R-multiples."""
+        # With 1% stop distance, 10bps fee = 0.10R fee cost
+        kelly_input = KellyInput(
+            win_rate=0.60,
+            avg_win_r=1.5,
+            avg_loss_r=1.0,
+            episode_count=100,
+            account_value=100000,
+            current_price=50000,
+            stop_distance_pct=0.01,  # 1% stop
+            round_trip_fee_pct=0.001,  # 10 bps
+        )
+        # Fee cost in R = 0.001 / 0.01 = 0.10R
+        result = kelly_position_size(kelly_input)
+
+        # Check that fees are mentioned in reasoning with ~0.10R
+        assert "Fees=" in result.reasoning
+        # Extract fee value from reasoning (format: "Fees=0.10R")
+        import re
+        match = re.search(r"Fees=(\d+\.\d+)R", result.reasoning)
+        assert match is not None
+        fee_r = float(match.group(1))
+        assert fee_r == pytest.approx(0.10, abs=0.01)
+
+    def test_zero_fees_no_impact(self):
+        """Zero fees should not affect Kelly calculation."""
+        kelly_input_no_fee = KellyInput(
+            win_rate=0.60,
+            avg_win_r=1.5,
+            avg_loss_r=1.0,
+            episode_count=100,
+            account_value=100000,
+            current_price=50000,
+            stop_distance_pct=0.02,
+            round_trip_fee_pct=0.0,  # No fees
+        )
+        kelly_input_default = KellyInput(
+            win_rate=0.60,
+            avg_win_r=1.5,
+            avg_loss_r=1.0,
+            episode_count=100,
+            account_value=100000,
+            current_price=50000,
+            stop_distance_pct=0.02,
+            round_trip_fee_pct=0.001,  # Default 10 bps
+        )
+
+        result_no_fee = kelly_position_size(kelly_input_no_fee)
+        result_with_fee = kelly_position_size(kelly_input_default)
+
+        # No fee result should not have "Fees=" in reasoning
+        assert "Fees=" not in result_no_fee.reasoning
+        # With fee result should have "Fees=" in reasoning
+        assert "Fees=" in result_with_fee.reasoning

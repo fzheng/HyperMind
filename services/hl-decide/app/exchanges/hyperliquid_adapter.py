@@ -282,15 +282,18 @@ class HyperliquidAdapter(ExchangeInterface):
         if not self._exchange:
             return OrderResult(success=False, error="Exchange not connected")
 
+        # Format symbol for exchange
+        symbol = self.format_symbol(params.symbol)
+
         # Get current price for slippage tracking
-        mid_price = await self.get_market_price(params.symbol)
+        mid_price = await self.get_market_price(symbol)
         if not mid_price:
-            return OrderResult(success=False, error=f"Could not get price for {params.symbol}")
+            return OrderResult(success=False, error=f"Could not get price for {symbol}")
 
         try:
             # Set leverage if specified
             if params.leverage:
-                await self.set_leverage(params.symbol, params.leverage)
+                await self.set_leverage(symbol, params.leverage)
 
             # Convert slippage to decimal
             slippage = params.slippage_pct / 100
@@ -298,7 +301,7 @@ class HyperliquidAdapter(ExchangeInterface):
             # Place market order using SDK
             is_buy = params.side == OrderSide.BUY
             result = self._exchange.market_open(
-                coin=params.symbol,
+                coin=symbol,
                 is_buy=is_buy,
                 sz=params.size,
                 px=None,  # Market order
@@ -319,24 +322,27 @@ class HyperliquidAdapter(ExchangeInterface):
         if not self._exchange:
             return OrderResult(success=False, error="Exchange not connected")
 
+        # Format symbol for exchange
+        formatted_symbol = self.format_symbol(symbol)
+
         try:
-            mid_price = await self.get_market_price(symbol)
+            mid_price = await self.get_market_price(formatted_symbol)
 
             if size is None:
                 # Full close using SDK
                 result = self._exchange.market_close(
-                    coin=symbol,
+                    coin=formatted_symbol,
                     slippage=self.config.default_slippage_pct / 100,
                 )
             else:
                 # Partial close - need to determine direction
-                position = await self.get_position(symbol)
+                position = await self.get_position(formatted_symbol)
                 if not position:
                     return OrderResult(success=True, fill_size=0, error="No position to close")
 
                 is_buy = position.size < 0  # Buy to close short, sell to close long
                 result = self._exchange.market_open(
-                    coin=symbol,
+                    coin=formatted_symbol,
                     is_buy=is_buy,
                     sz=abs(size),
                     px=None,

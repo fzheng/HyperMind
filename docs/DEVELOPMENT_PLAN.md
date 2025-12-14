@@ -22,11 +22,12 @@ A collective intelligence trading system that learns from top Hyperliquid trader
 | 4 | Risk Management (Kelly criterion, stops, circuit breakers) | ✅ Complete |
 | 5 | Market Regime Detection | ✅ Complete |
 | 4-5 Integration | Wire regime/risk/execution together | ✅ Complete |
-| 6 | Multi-Exchange Integration | 🔶 In Progress |
+| 6 | Multi-Exchange Integration | ✅ Complete |
+| 6.1 | Multi-Exchange Refinements | ✅ Complete |
 
 ---
 
-## Current State: Phase 6 In Progress
+## Current State: Phase 6.1 Complete
 
 ### What's Working
 
@@ -36,7 +37,7 @@ Leaderboard → Quality Filter → Alpha Pool → Thompson Sampling → Consensu
    1000+          7 gates         50 traders      NIG posterior       5 gates    Kelly sized
 ```
 
-**Multi-Exchange Support (Phase 6):**
+**Multi-Exchange Support (Phase 6 Complete):**
 ```
                     ┌─────────────────────┐
                     │  ExchangeInterface  │
@@ -49,6 +50,16 @@ Leaderboard → Quality Filter → Alpha Pool → Thompson Sampling → Consensu
    │    Adapter    │   │    Adapter    │   │   Adapter     │
    └───────────────┘   └───────────────┘   └───────────────┘
          DEX                 DEX                 CEX
+
+                    ┌─────────────────────┐
+                    │   ExchangeManager   │
+                    │  (Singleton Router) │
+                    └──────────┬──────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              ▼                ▼                ▼
+        Route orders    Health checks    Per-exchange
+        to target       w/ stagger       fee config
 ```
 
 **Services:**
@@ -61,7 +72,7 @@ Leaderboard → Quality Filter → Alpha Pool → Thompson Sampling → Consensu
 
 **Test Coverage:**
 - TypeScript: 1,035 unit tests (28 test suites)
-- Python: 418 tests (hl-sage + hl-decide including Kelly, regime, exchange adapters)
+- Python: 676 tests (hl-sage + hl-decide including Kelly, regime, exchange adapters, ATR/fee/funding/slippage/normalizer/executor/hold-time providers)
 - E2E: 220 Playwright tests (6 spec files)
 
 ### Phase 3c Additions (December 2025)
@@ -638,26 +649,65 @@ Wire together the Phase 4/5 components into the live signal/execution pipeline.
 
 ---
 
-## Phase 6: Multi-Exchange Integration 🔶
+## Phase 6: Multi-Exchange Integration ✅
 
 ### Goal
 Expand beyond Hyperliquid to support additional exchanges with a unified interface.
 
-### Status: In Progress (December 2025)
+### Status: Complete (December 2025)
 
-**Completed:**
+**All Tasks Completed:**
 - [x] Abstract exchange interface (`ExchangeInterface` ABC)
 - [x] Hyperliquid adapter (wraps hyperliquid-python-sdk)
 - [x] Aster DEX adapter (ECDSA signing, agent wallet support)
 - [x] Bybit adapter (pybit SDK, USDT linear perpetuals)
 - [x] Exchange factory for adapter creation
-- [x] 34 unit tests for exchange module
+- [x] ExchangeManager singleton for order routing
+- [x] Health check with rate-limiting stagger (configurable delay)
+- [x] Per-exchange fee configuration (FeeConfig dataclass)
+- [x] Per-exchange fees wired into Kelly sizing (executor)
+- [x] Per-exchange fees wired into consensus EV gate
+- [x] Target exchange configuration at startup
+- [x] Multi-exchange position tracking via ExchangeManager
+- [x] 65 unit tests for exchange module (adapters + manager)
 
-**Pending:**
-- [ ] Unified position tracking across exchanges
-- [ ] Cross-exchange risk management
-- [ ] Dashboard exchange selector
-- [ ] Multi-exchange execution routing
+### ExchangeManager (Singleton Router)
+
+The `ExchangeManager` provides centralized exchange routing with these features:
+
+| Feature | Description |
+|---------|-------------|
+| Singleton pattern | Global instance via `get_exchange_manager()` |
+| Multi-exchange registration | Register adapters for HL, Aster, Bybit |
+| Order routing | Route to target exchange or default |
+| Position aggregation | Unified view across all exchanges |
+| Health monitoring | Staggered health checks to avoid API limits |
+| Fee configuration | Per-exchange fee lookup via `FeeConfig` |
+
+**Configuration:**
+```bash
+# Target exchange for execution
+EXECUTION_EXCHANGE=hyperliquid     # hyperliquid, aster, or bybit
+
+# Health check rate limiting
+EXCHANGE_HEALTH_STAGGER_DELAY_MS=500  # Delay between exchange health checks
+```
+
+### Per-Exchange Fee Configuration
+
+Fees are configured per exchange for accurate Kelly sizing and EV calculation:
+
+| Exchange | Maker | Taker | Round-Trip |
+|----------|-------|-------|------------|
+| Hyperliquid | 2 bps | 5 bps | 10 bps |
+| Aster | 2 bps | 5 bps | 10 bps |
+| Bybit (VIP0) | 2 bps | 6 bps | 12 bps |
+
+**Fee Flow:**
+1. Executor fetches `FeeConfig` for target exchange
+2. Calculates `round_trip_fee_pct` from bps
+3. Passes to Kelly sizing function
+4. Consensus detector uses exchange fees in EV gate
 
 ### Exchange Interface Design
 
@@ -690,10 +740,12 @@ All adapters implement the `ExchangeInterface` ABC with these operations:
 | `exchanges/__init__.py` | Module exports |
 | `exchanges/interface.py` | Abstract interface & data classes |
 | `exchanges/factory.py` | Adapter factory functions |
+| `exchanges/manager.py` | ExchangeManager singleton router |
 | `exchanges/hyperliquid_adapter.py` | Hyperliquid implementation |
 | `exchanges/aster_adapter.py` | Aster DEX implementation |
 | `exchanges/bybit_adapter.py` | Bybit implementation |
-| `tests/test_exchanges.py` | Unit tests (34 tests) |
+| `tests/test_exchanges.py` | Adapter unit tests (34 tests) |
+| `tests/test_exchange_manager.py` | Manager unit tests (31 tests) |
 
 ### Configuration
 
@@ -756,6 +808,221 @@ await exchange.disconnect()
 | Symbol formatting | Each exchange handles formats correctly | ✅ Tested |
 | Credential loading | Secure env var loading, no hardcoded keys | ✅ Config pattern |
 | Graceful failures | Not-connected returns None/empty, not exceptions | ✅ Tested |
+| ExchangeManager routing | Orders route to correct exchange | ✅ 31 tests passing |
+| Health check stagger | API rate limits respected | ✅ Configurable delay |
+| Per-exchange fees | Kelly/EV use correct fee schedule | ✅ Wired in executor + consensus |
+
+---
+
+## Phase 6.1: Multi-Exchange Refinements 🔶
+
+### Goal
+Address remaining gaps in multi-exchange support for production-quality execution across venues.
+
+### Status: Complete ✅ (December 2025)
+
+### Remaining Gaps (from Quant Review)
+
+| Gap | Risk | Priority |
+|-----|------|----------|
+| ATR/volatility HL-centric | Stop distances wrong for other venues | High |
+| Fees static at startup | Miss VIP tier changes mid-session | Medium |
+| No funding rate modeling | Holding costs differ 10x between venues | High |
+| No slippage modeling | Bybit orderbooks may have less depth | Medium |
+| Account state normalization | Bybit USDT vs HL USD equity confusion | Medium |
+| No multi-exchange backtest | Unvalidated profitability assumptions | Low |
+
+### Tasks
+
+#### 6.1.1 Venue-Specific Volatility Data ✅
+- [x] Abstract ATR provider interface (`ATRProviderInterface` ABC)
+- [x] Hyperliquid ATR adapter (uses marks_1m table)
+- [x] Bybit ATR adapter (via v5 market kline API)
+- [x] ATR Manager for exchange-aware routing
+- [x] Exchange-aware ATR lookup in consensus detector
+- [x] 36 unit tests for multi-venue ATR
+
+**Why**: Stop distances use ATR. If executing on Bybit but using HL's ATR, stops may be wrong by 20-50% during volatility divergence.
+
+**Key Files:**
+- `app/atr_provider/interface.py` - Abstract interface and core functions
+- `app/atr_provider/hyperliquid.py` - Hyperliquid provider (DB-backed)
+- `app/atr_provider/bybit.py` - Bybit provider (API-backed)
+- `app/atr_provider/manager.py` - ATR routing manager
+- `tests/test_atr_provider.py` - Unit tests
+
+#### 6.1.2 Dynamic Fee Lookup ✅
+- [x] FeeProvider with short-TTL caching (5 min default)
+- [x] Static fallback when API unavailable
+- [x] `get_exchange_fees_bps_dynamic()` async function in consensus
+- [x] Initialization in main.py lifespan
+- [x] 20 unit tests for fee provider
+
+**Why**: VIP tiers change, promotions happen. Static fees can be 50% wrong.
+
+**Key Files:**
+- `app/fee_provider.py` - Dynamic fee provider with caching
+- `tests/test_fee_provider.py` - Unit tests
+
+#### 6.1.3 Funding Rate Modeling ✅
+- [x] FundingProvider with short-TTL caching (5 min default)
+- [x] Hyperliquid funding API integration (via /info meta endpoint)
+- [x] Bybit funding API integration (via v5/market/tickers)
+- [x] Static fallback rates when API unavailable
+- [x] `get_funding_cost_bps_sync()` for use in consensus detection
+- [x] Include funding in EV calculation (`calculate_ev` updated)
+- [x] Pre-fetch funding rates on startup
+- [x] **Direction-aware funding**: Long pays when rate > 0, short receives (and vice versa)
+- [x] 26 unit tests for funding provider
+
+**Why**: Funding rates differ 10x between venues. A +0.01% funding on HL vs -0.05% on Bybit = 0.06%/8h = ~6R/month drag.
+
+**Funding Direction Logic:**
+- Positive rate: longs pay shorts → long cost = +rate×intervals, short cost = -rate×intervals (rebate)
+- Negative rate: shorts pay longs → long cost = -rate×intervals (rebate), short cost = +rate×intervals
+- Consensus detector passes `majority_dir` for correct sign calculation
+
+**Key Files:**
+- `app/funding_provider.py` - Funding rate provider with caching
+- `app/consensus.py` - `get_funding_cost_bps_sync()`, updated `calculate_ev()`
+- `app/main.py` - `update_funding_for_consensus()` startup function
+- `tests/test_funding_provider.py` - 26 unit tests
+
+#### 6.1.4 Slippage Estimation ✅
+- [x] SlippageProvider with short-TTL caching (1 min default)
+- [x] Hyperliquid orderbook API integration (via l2Book endpoint)
+- [x] Bybit orderbook API integration (via v5/market/orderbook)
+- [x] Static fallback slippage estimates by order size
+- [x] `get_slippage_estimate_bps_sync()` for use in consensus detection
+- [x] Include slippage in EV calculation (`calculate_ev` updated)
+- [x] Warning threshold for high slippage (10 bps default)
+- [x] Pre-fetch orderbooks on startup
+- [x] 30 unit tests for slippage provider
+
+**Why**: Executing $100k on thin orderbook can add 20+ bps slippage.
+
+**Key Files:**
+- `app/slippage_provider.py` - Orderbook-based slippage estimation
+- `app/consensus.py` - `get_slippage_estimate_bps_sync()`, updated EV calculation
+- `app/main.py` - `update_orderbooks_for_slippage()` startup function
+- `tests/test_slippage_provider.py` - 30 unit tests
+
+#### 6.1.5 Account State Normalization ✅
+- [x] Normalize all equity to USD (Bybit USDT → USD conversion)
+- [x] USDT/USD rate fetching with caching (CoinGecko API, 60s TTL)
+- [x] Static fallback rate (1.0) when API unavailable
+- [x] Depeg warning detection (>0.5% deviation from $1.00)
+- [x] `NormalizedBalance` dataclass for USD-normalized values
+- [x] `NormalizedPosition` dataclass for USD-normalized notional
+- [x] Sync and async normalization methods
+- [x] Integration with main.py startup (pre-fetch USDT rate)
+- [x] 33 unit tests for account normalizer
+
+**Why**: Risk sizing and exposure caps can be wrong on non-HL venues until equity is normalized. Bybit reports USDT (stablecoin), HL reports USD (mark-to-market).
+
+**Key Files:**
+- `app/account_normalizer.py` - Account state normalizer with USDT/USD conversion
+- `tests/test_account_normalizer.py` - 33 unit tests
+
+**Usage:**
+```python
+from app.account_normalizer import get_account_normalizer
+
+normalizer = get_account_normalizer()
+bybit_balance = await bybit.get_balance()  # currency="USDT"
+normalized = await normalizer.normalize_balance(bybit_balance)
+print(f"Equity: ${normalized.total_equity_usd:.2f}")  # Now in USD
+```
+
+### Known Gaps (from Quant Review)
+
+The following gaps have been identified through quant review and need to be addressed for production correctness:
+
+#### Gap 1: Slippage Sizing ✅ (Resolved)
+**Issue**: Slippage estimation uses vote notional ($100k reference), not actual Kelly-sized position.
+**Impact**: Slippage could be underestimated by 2-5x for larger positions, overestimated for smaller.
+**Fix Applied**: Two-stage slippage calculation:
+1. Consensus detection uses `SLIPPAGE_REFERENCE_SIZE_USD` ($10k) for initial EV gating
+2. Executor recalculates slippage with actual Kelly-sized position after sizing
+3. EV is re-validated with actual slippage - signal rejected if EV drops below minimum
+- Added `SLIPPAGE_REFERENCE_SIZE_USD` config (default $10k)
+- Executor logs actual slippage and EV for audit trail
+- 6 new tests for slippage recalculation
+
+#### Gap 2: Hold-Time Assumption ✅ (Resolved)
+**Issue**: Funding cost uses fixed 24-hour hold-time assumption (`DEFAULT_HOLD_HOURS=24`).
+**Impact**: May over/underestimate funding by 2-3x if typical holds are 12h or 48h.
+**Fix Applied**: Dynamic hold-time estimation from historical episode data:
+- `HoldTimeEstimator` computes median hold time from `position_signals.hold_secs`
+- Per-asset estimates (BTC and ETH tracked separately)
+- Regime-adjusted multipliers (TRENDING +25%, VOLATILE -25%)
+- 5-minute cache TTL with fallback to default 24h when insufficient data
+- Wired into consensus detection and executor for accurate funding cost
+- 26 new tests for hold time estimation
+
+#### Gap 3: Market Data HL-Centric ✅ (Resolved)
+**Issue**: ATR, regime, and correlation data still sourced from Hyperliquid only.
+**Impact**: If executing on Bybit, ATR/stops based on HL data may be 20-50% wrong during volatility divergence.
+**Fix Applied**: Multi-exchange regime detection implemented:
+- `RegimeDetector` now accepts `exchange` parameter for venue-specific detection
+- `_fetch_candles_multi_exchange()` routes through ATR provider infrastructure
+- Cache keys include exchange for separate per-venue regime caching
+- Fallback to Hyperliquid DB if target exchange unavailable
+- `RegimeAnalysis` includes `exchange` field for audit trail
+- 10 new tests for multi-exchange regime detection
+
+**Key Files:**
+- `app/regime.py` - Updated with multi-exchange support
+- `tests/test_regime.py` - 49 tests (39 existing + 10 new)
+
+#### Gap 4: Static Target Exchange ✅ (Resolved)
+**Issue**: EV calculation uses single `self._target_exchange` for all signals.
+**Impact**: Cannot compare profitability across venues for same signal.
+**Fix Applied**: Per-venue EV calculation and comparison:
+- `ConsensusDetector.calculate_ev_for_exchange()` - Calculate EV for specific exchange
+- `ConsensusDetector.compare_ev_across_exchanges()` - Compare EV across venues and find best
+- Returns detailed cost breakdown (fees, slippage, funding, hold_hours per exchange)
+- Identifies best execution venue by net EV
+- 17 new tests for per-venue EV calculation
+
+**Key Files:**
+- `app/consensus.py` - Added `calculate_ev_for_exchange()` and `compare_ev_across_exchanges()`
+- `tests/test_ev_per_venue.py` - 17 new tests
+
+#### Gap 5: Account Normalization Usage ✅ (Resolved)
+**Issue**: Account normalizer exists but risk/exposure/sizing paths may not consume normalized equity.
+**Fix Applied**: Executor `_to_hl_account_state()` now uses `get_account_normalizer().normalize_balance_sync()` to convert all values to USD before passing to risk governor. USDT → USD conversion happens automatically for Bybit positions.
+- `accountValue`, `totalMarginUsed`, `totalNtlPos` are all USD-normalized
+- `_normalization` metadata included for audit trail (original_currency, conversion_rate, is_depeg_warning)
+
+### Pre-Live Validation Checklist
+
+Before enabling live trading on any venue, validate:
+
+1. **Multi-venue sim/backtest**: Run with venue-specific vol/funding/slippage and empirical hold-time distribution
+2. ~~**Slippage sizing**: Confirm slippage uses actual Kelly-sized notional, not vote total~~ ✅ Fixed
+3. ~~**Hold-time calibration**: Validate 24h assumption against actual episode durations~~ ✅ Fixed
+4. ~~**Normalized exposure**: Verify risk paths consume USD-normalized equity~~ ✅ Fixed
+5. ~~**Per-venue ATR/regime**: Confirm stops use target exchange volatility, not HL~~ ✅ Fixed
+6. ~~**Per-venue EV comparison**: Confirm EV can be calculated per exchange~~ ✅ Fixed
+
+### Success Criteria
+
+| Criteria | Pass Condition | Status |
+|----------|----------------|--------|
+| Venue-specific ATR | Each exchange uses own volatility data | ✅ 36 tests |
+| Dynamic fees | Fees refresh with TTL caching | ✅ 20 tests |
+| Funding in EV | Hold cost affects signal selection | ✅ 26 tests |
+| Slippage estimation | Large orders get slippage warning | ✅ 30 tests |
+| Account normalization | USDT/USD equity consistent | ✅ 33 tests |
+| Normalization wired | Risk paths use normalized equity | ✅ 22 tests |
+| Slippage re-calc | Executor uses Kelly-sized position | ✅ 6 tests |
+| Dynamic hold-time | Funding uses historical episode data | ✅ 26 tests |
+| Multi-exchange regime | Regime detection per venue | ✅ 49 tests |
+| Per-venue EV | EV calculation per exchange | ✅ 17 tests |
+| Aggregated balance normalized | ExchangeManager uses USD normalization | ✅ Wired |
+
+**Total Phase 6.1 Tests: 720+** (703 Python tests including all provider tests)
 
 ---
 
@@ -803,6 +1070,7 @@ await exchange.disconnect()
 | Hyperliquid Adapter | `services/hl-decide/app/exchanges/hyperliquid_adapter.py` |
 | Aster Adapter | `services/hl-decide/app/exchanges/aster_adapter.py` |
 | Bybit Adapter | `services/hl-decide/app/exchanges/bybit_adapter.py` |
+| Exchange Manager | `services/hl-decide/app/exchanges/manager.py` |
 | Dashboard | `services/hl-stream/public/dashboard.html` |
 | Init Script | `scripts/init-alpha-pool.mjs` |
 
@@ -920,4 +1188,4 @@ docker compose logs -f hl-decide
 
 ---
 
-*Last updated: December 13, 2025 (Phase 6 Multi-Exchange: Hyperliquid + Aster + Bybit adapters)*
+*Last updated: December 14, 2025 (Phase 6.1 complete: All multi-exchange gaps resolved - 703 Python tests; per-venue ATR/regime/EV; USD normalization in all risk paths; Kelly-sized slippage recalculation; dynamic hold-time estimation)*

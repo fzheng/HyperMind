@@ -47,6 +47,7 @@ class KellyInput:
     account_value: float  # Current equity in USD
     current_price: float  # Asset price for size calculation
     stop_distance_pct: float  # Stop distance as fraction (0.01 = 1%)
+    round_trip_fee_pct: float = 0.001  # Round-trip fees as fraction (0.001 = 10 bps)
 
 
 @dataclass
@@ -112,22 +113,28 @@ def calculate_expected_value(
     win_rate: float,
     avg_win_r: float,
     avg_loss_r: float,
+    fee_cost_r: float = 0.0,
 ) -> float:
     """
     Calculate expected value per trade in R-multiples.
 
-    EV = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+    EV = (win_rate * avg_win) - ((1 - win_rate) * avg_loss) - fee_cost
+
+    Fee cost is subtracted because every trade incurs fees regardless of outcome.
+    This makes higher-fee exchanges less favorable for the same edge.
 
     Args:
         win_rate: Probability of winning (0-1)
         avg_win_r: Average win in R-multiples
         avg_loss_r: Average loss in R-multiples (positive)
+        fee_cost_r: Round-trip fee cost in R-multiples (applied every trade)
 
     Returns:
-        Expected value per trade in R-multiples
+        Expected value per trade in R-multiples (fee-adjusted)
     """
     avg_loss_r = abs(avg_loss_r)
-    return (win_rate * avg_win_r) - ((1 - win_rate) * avg_loss_r)
+    raw_ev = (win_rate * avg_win_r) - ((1 - win_rate) * avg_loss_r)
+    return raw_ev - fee_cost_r
 
 
 def kelly_position_size(
@@ -188,17 +195,25 @@ def kelly_position_size(
             capped=False,
         )
 
-    # Calculate expected value first
+    # Convert round-trip fees to R-multiples
+    # If stop is 1%, then 10bps round-trip = 0.1R fee drag
+    fee_cost_r = 0.0
+    if kelly_input.stop_distance_pct > 0 and kelly_input.round_trip_fee_pct > 0:
+        fee_cost_r = kelly_input.round_trip_fee_pct / kelly_input.stop_distance_pct
+
+    # Calculate expected value with fee adjustment
     ev = calculate_expected_value(
         kelly_input.win_rate,
         kelly_input.avg_win_r,
         kelly_input.avg_loss_r,
+        fee_cost_r,
     )
 
     # If EV is negative, don't trade (or use minimal size for learning)
     if ev <= 0:
         position_pct = fallback_pct * 0.5  # Half fallback for negative EV
         size_usd = account_value * position_pct
+        fee_msg = f" (incl {fee_cost_r:.3f}R fees)" if fee_cost_r > 0 else ""
         return KellyResult(
             full_kelly=0.0,
             fractional_kelly=0.0,
@@ -206,7 +221,7 @@ def kelly_position_size(
             position_size_usd=size_usd,
             position_size_coin=size_usd / current_price,
             method="fallback_negative_ev",
-            reasoning=f"Negative EV: {ev:.3f}R per trade",
+            reasoning=f"Negative EV: {ev:.3f}R per trade{fee_msg}",
             capped=False,
         )
 
@@ -241,6 +256,13 @@ def kelly_position_size(
     size_usd = account_value * position_pct
     size_coin = size_usd / current_price
 
+    # Build reasoning with fee info if applicable
+    fee_msg = f", Fees={fee_cost_r:.2f}R" if fee_cost_r > 0 else ""
+    reasoning = (
+        f"Kelly={full_kelly:.1%}, Fractional={fractional_kelly:.1%}, "
+        f"EV={ev:.3f}R, Win={kelly_input.win_rate:.1%}{fee_msg}"
+    )
+
     return KellyResult(
         full_kelly=full_kelly,
         fractional_kelly=fractional_kelly,
@@ -248,8 +270,7 @@ def kelly_position_size(
         position_size_usd=size_usd,
         position_size_coin=size_coin,
         method="kelly",
-        reasoning=f"Kelly={full_kelly:.1%}, Fractional={fractional_kelly:.1%}, "
-        f"EV={ev:.3f}R, Win={kelly_input.win_rate:.1%}",
+        reasoning=reasoning,
         capped=capped,
     )
 
@@ -260,6 +281,7 @@ async def get_kelly_input_from_db(
     account_value: float,
     current_price: float,
     stop_distance_pct: float,
+    round_trip_fee_pct: float = 0.001,
 ) -> Optional[KellyInput]:
     """
     Fetch trader performance data from database for Kelly calculation.
@@ -270,6 +292,7 @@ async def get_kelly_input_from_db(
         account_value: Current account equity
         current_price: Current asset price
         stop_distance_pct: Stop distance as fraction
+        round_trip_fee_pct: Round-trip fees as fraction (default 10 bps)
 
     Returns:
         KellyInput if data found, None otherwise
@@ -297,6 +320,7 @@ async def get_kelly_input_from_db(
         account_value=account_value,
         current_price=current_price,
         stop_distance_pct=stop_distance_pct,
+        round_trip_fee_pct=round_trip_fee_pct,
     )
 
 
@@ -307,6 +331,7 @@ async def get_consensus_kelly_size(
     current_price: float,
     stop_distance_pct: float,
     fraction: float = KELLY_FRACTION,
+    round_trip_fee_pct: float = 0.001,
 ) -> KellyResult:
     """
     Calculate Kelly-based position size for a consensus signal.
@@ -323,6 +348,7 @@ async def get_consensus_kelly_size(
         current_price: Current asset price
         stop_distance_pct: Stop distance as fraction
         fraction: Fractional Kelly multiplier
+        round_trip_fee_pct: Round-trip fees as fraction (passed to Kelly)
 
     Returns:
         KellyResult with aggregated sizing
@@ -331,7 +357,8 @@ async def get_consensus_kelly_size(
 
     for address in addresses:
         kelly_input = await get_kelly_input_from_db(
-            db, address, account_value, current_price, stop_distance_pct
+            db, address, account_value, current_price, stop_distance_pct,
+            round_trip_fee_pct=round_trip_fee_pct,
         )
         if kelly_input and kelly_input.episode_count >= KELLY_MIN_EPISODES:
             result = kelly_position_size(kelly_input, fraction=fraction)

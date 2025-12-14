@@ -2,6 +2,7 @@
 Stop-Loss and Take-Profit Management
 
 Phase 4.3: Position Management
+Phase 6: Multi-Exchange Support
 
 Monitors open positions and triggers exits when:
 - Price hits stop-loss level
@@ -9,7 +10,7 @@ Monitors open positions and triggers exits when:
 - Position times out (configurable)
 
 This module implements local stop monitoring with price polling.
-Future enhancement: Native Hyperliquid stop orders.
+Supports multiple exchanges via ExchangeManager (Phase 6).
 
 @module stop_manager
 """
@@ -23,7 +24,12 @@ from uuid import UUID
 
 import asyncpg
 
-from .hl_exchange import get_exchange, OrderResult
+from .hl_exchange import get_exchange as get_hl_exchange, OrderResult
+from .exchanges import (
+    ExchangeType,
+    get_exchange_manager,
+    OrderResult as ExchangeOrderResult,
+)
 
 
 # Configuration
@@ -48,6 +54,7 @@ class StopConfig:
     trail_distance_pct: float
     timeout_at: Optional[datetime]
     created_at: datetime
+    exchange: str = "hyperliquid"  # Phase 6: track which exchange
 
 
 @dataclass
@@ -95,6 +102,7 @@ class StopManager:
         take_profit_rr: float = DEFAULT_RR_RATIO,
         trailing_enabled: bool = TRAILING_STOP_ENABLED,
         timeout_hours: int = MAX_POSITION_HOURS,
+        exchange: str = "hyperliquid",
     ) -> StopConfig:
         """
         Register a stop for a newly opened position.
@@ -109,6 +117,7 @@ class StopManager:
             take_profit_rr: Reward:risk ratio for take-profit
             trailing_enabled: Whether to trail the stop
             timeout_hours: Maximum hours to hold position
+            exchange: Exchange where position is held (Phase 6)
 
         Returns:
             StopConfig with all stop parameters
@@ -136,6 +145,7 @@ class StopManager:
             trail_distance_pct=stop_distance_pct,
             timeout_at=timeout_at,
             created_at=datetime.now(timezone.utc),
+            exchange=exchange,
         )
 
         # Persist to database
@@ -143,7 +153,7 @@ class StopManager:
 
         print(
             f"[stop_manager] Registered stop for {decision_id}: "
-            f"{symbol} {direction} entry=${entry_price:.2f}, "
+            f"{symbol} {direction} on {exchange} entry=${entry_price:.2f}, "
             f"stop=${stop_price:.2f}, tp=${take_profit_price:.2f if take_profit_price else 'None'}"
         )
 
@@ -189,11 +199,12 @@ class StopManager:
                     INSERT INTO active_stops
                     (decision_id, symbol, direction, entry_price, entry_size,
                      stop_price, take_profit_price, trailing_enabled,
-                     trail_distance_pct, timeout_at, status)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active')
+                     trail_distance_pct, timeout_at, status, exchange)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11)
                     ON CONFLICT (symbol, decision_id) DO UPDATE SET
                         stop_price = EXCLUDED.stop_price,
                         take_profit_price = EXCLUDED.take_profit_price,
+                        exchange = EXCLUDED.exchange,
                         status = 'active'
                     """,
                     config.decision_id,
@@ -206,6 +217,7 @@ class StopManager:
                     config.trailing_enabled,
                     config.trail_distance_pct,
                     config.timeout_at,
+                    config.exchange,
                 )
         except Exception as e:
             print(f"[stop_manager] Failed to save stop: {e}")
@@ -218,7 +230,8 @@ class StopManager:
                     """
                     SELECT decision_id, symbol, direction, entry_price, entry_size,
                            stop_price, take_profit_price, trailing_enabled,
-                           trail_distance_pct, timeout_at, created_at
+                           trail_distance_pct, timeout_at, created_at,
+                           COALESCE(exchange, 'hyperliquid') as exchange
                     FROM active_stops
                     WHERE status = 'active'
                     """
@@ -240,6 +253,7 @@ class StopManager:
                         trail_distance_pct=float(row["trail_distance_pct"] or 0.02),
                         timeout_at=row["timeout_at"],
                         created_at=row["created_at"],
+                        exchange=row["exchange"],
                     )
                     for row in rows
                 ]
@@ -251,6 +265,9 @@ class StopManager:
         """
         Check all active stops against current prices.
 
+        Uses ExchangeManager for multi-exchange price lookups.
+        Falls back to legacy Hyperliquid API if exchange not connected.
+
         Returns:
             List of triggered stops
         """
@@ -260,18 +277,24 @@ class StopManager:
         if not stops:
             return triggered
 
-        # Get current prices
-        exchange = get_exchange()
-        prices = {}
-        for symbol in set(s.symbol for s in stops):
-            price = await exchange.get_mid_price(symbol)
+        # Get current prices grouped by exchange
+        exchange_manager = get_exchange_manager()
+        prices: dict[tuple[str, str], float] = {}  # (exchange, symbol) -> price
+
+        for stop in stops:
+            key = (stop.exchange, stop.symbol)
+            if key in prices:
+                continue
+
+            price = await self._get_price_for_stop(stop, exchange_manager)
             if price:
-                prices[symbol] = price
+                prices[key] = price
 
         now = datetime.now(timezone.utc)
 
         for stop in stops:
-            current_price = prices.get(stop.symbol)
+            key = (stop.exchange, stop.symbol)
+            current_price = prices.get(key)
             if not current_price:
                 continue
 
@@ -299,6 +322,41 @@ class StopManager:
                 triggered.append(result)
 
         return triggered
+
+    async def _get_price_for_stop(
+        self,
+        stop: StopConfig,
+        exchange_manager,
+    ) -> Optional[float]:
+        """
+        Get price for a stop from the correct exchange.
+
+        Args:
+            stop: Stop config with exchange info
+            exchange_manager: ExchangeManager instance
+
+        Returns:
+            Current price or None
+        """
+        # Try ExchangeManager first
+        try:
+            exchange_type = ExchangeType(stop.exchange)
+            exchange = exchange_manager.get_exchange(exchange_type)
+            if exchange and exchange.is_connected:
+                formatted_symbol = exchange.format_symbol(stop.symbol)
+                price = await exchange.get_market_price(formatted_symbol)
+                if price:
+                    return price
+        except (ValueError, Exception) as e:
+            # Exchange type not recognized or API error - fall through
+            pass
+
+        # Fall back to legacy Hyperliquid API
+        try:
+            hl_exchange = get_hl_exchange()
+            return await hl_exchange.get_mid_price(stop.symbol)
+        except Exception:
+            return None
 
     def _is_stop_hit(self, stop: StopConfig, current_price: float) -> bool:
         """Check if stop-loss is hit."""
@@ -358,15 +416,14 @@ class StopManager:
         reason: str,
         trigger_price: float,
     ) -> StopTriggerResult:
-        """Execute stop trigger and close position."""
+        """Execute stop trigger and close position on correct exchange."""
         print(
-            f"[stop_manager] STOP TRIGGERED: {stop.symbol} {stop.direction} "
+            f"[stop_manager] STOP TRIGGERED: {stop.symbol} {stop.direction} on {stop.exchange} "
             f"reason={reason} price=${trigger_price:.2f}"
         )
 
-        # Close the position
-        exchange = get_exchange()
-        order_result = await exchange.close_position(stop.symbol)
+        # Close the position on the correct exchange
+        order_result = await self._close_position_on_exchange(stop)
 
         # Update database
         try:
@@ -394,6 +451,51 @@ class StopManager:
             trigger_price=trigger_price,
             order_result=order_result,
         )
+
+    async def _close_position_on_exchange(
+        self,
+        stop: StopConfig,
+    ) -> Optional[OrderResult]:
+        """
+        Close position on the correct exchange.
+
+        Uses ExchangeManager for multi-exchange support.
+        Falls back to legacy Hyperliquid API if exchange not connected.
+
+        Args:
+            stop: Stop config with exchange info
+
+        Returns:
+            OrderResult or None
+        """
+        exchange_manager = get_exchange_manager()
+
+        # Try ExchangeManager first
+        try:
+            exchange_type = ExchangeType(stop.exchange)
+            exchange = exchange_manager.get_exchange(exchange_type)
+            if exchange and exchange.is_connected:
+                formatted_symbol = exchange.format_symbol(stop.symbol)
+                result = await exchange.close_position(formatted_symbol)
+                # Convert ExchangeOrderResult to legacy OrderResult format
+                return OrderResult(
+                    success=result.success,
+                    order_id=result.order_id,
+                    fill_price=result.fill_price,
+                    fill_size=result.fill_size,
+                    slippage_actual=result.slippage_actual,
+                    error=result.error,
+                )
+        except (ValueError, Exception) as e:
+            print(f"[stop_manager] ExchangeManager close failed, trying legacy: {e}")
+
+        # Fall back to legacy Hyperliquid API
+        try:
+            hl_exchange = get_hl_exchange()
+            return await hl_exchange.close_position(stop.symbol)
+        except Exception as e:
+            print(f"[stop_manager] Legacy close failed: {e}")
+            return None
 
     async def cancel_stop(self, decision_id: str, symbol: str) -> bool:
         """

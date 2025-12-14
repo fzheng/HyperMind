@@ -64,27 +64,30 @@ LOSS_STREAK_PAUSE_SECONDS = int(os.getenv("LOSS_STREAK_PAUSE_SECONDS", "3600")) 
 class RiskState:
     """Current risk state from account data."""
     timestamp: datetime
-    account_value: float
-    margin_used: float
+    account_value: float  # Always in USD (normalized)
+    margin_used: float  # Always in USD (normalized)
     maintenance_margin: float
-    total_exposure: float
+    total_exposure: float  # Always in USD (normalized)
     margin_ratio: float
     daily_pnl: float
     daily_starting_equity: float
     daily_drawdown_pct: float
     exchange: str = "hyperliquid"  # Phase 6: track which exchange this state is from
+    original_currency: str = "USD"  # Original currency before normalization
+    conversion_rate: float = 1.0  # Conversion rate used (1.0 for USD)
 
 
 @dataclass
 class AggregatedRiskState:
     """Aggregated risk state across all connected exchanges (Phase 6)."""
     timestamp: datetime
-    total_equity: float
-    total_margin_used: float
-    total_exposure: float
+    total_equity: float  # USD-normalized
+    total_margin_used: float  # USD-normalized
+    total_exposure: float  # USD-normalized
     per_exchange: dict  # exchange -> RiskState
     daily_pnl: float
     daily_drawdown_pct: float
+    is_normalized: bool = True  # All values USD-normalized (Phase 6.1.5)
 
 
 @dataclass

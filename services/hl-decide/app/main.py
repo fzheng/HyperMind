@@ -39,6 +39,11 @@ from contracts.py.models import FillEvent, ScoreEvent
 from .consensus import ConsensusDetector, Fill, ConsensusSignal
 from .episode import EpisodeTracker, EpisodeFill, Episode, EpisodeBuilderConfig
 from .atr import get_atr_provider, init_atr_provider, ATRProvider
+from .atr_provider import (
+    ATRManager,
+    get_atr_manager,
+    init_atr_manager,
+)
 from .correlation import (
     get_correlation_provider,
     init_correlation_provider,
@@ -64,6 +69,31 @@ from .regime import (
     MarketRegime,
     REGIME_PARAMS,
 )
+from .exchanges import (
+    init_exchange_manager,
+    get_exchange_manager,
+    ExchangeType,
+)
+from .fee_provider import (
+    init_fee_provider,
+    get_fee_provider,
+)
+from .funding_provider import (
+    init_funding_provider,
+    get_funding_provider,
+)
+from .slippage_provider import (
+    init_slippage_provider,
+    get_slippage_provider,
+)
+from .account_normalizer import (
+    init_account_normalizer,
+    get_account_normalizer,
+)
+from .hold_time_estimator import (
+    init_hold_time_estimator,
+    get_hold_time_estimator,
+)
 
 
 class ExecutionConfigUpdate(BaseModel):
@@ -87,6 +117,11 @@ RECONCILE_ON_STARTUP = os.getenv("RECONCILE_ON_STARTUP", "true").lower() == "tru
 
 # Correlation refresh settings
 CORR_REFRESH_INTERVAL_HOURS = int(os.getenv("CORR_REFRESH_INTERVAL_HOURS", "24"))  # Daily by default
+
+# Exchange settings
+EXCHANGE_TESTNET = os.getenv("HL_USE_TESTNET", "true").lower() == "true"
+EXCHANGE_HEALTH_CHECK_INTERVAL_MINUTES = int(os.getenv("EXCHANGE_HEALTH_CHECK_INTERVAL_MINUTES", "5"))
+EXCHANGE_HEALTH_STAGGER_DELAY_MS = int(os.getenv("EXCHANGE_HEALTH_STAGGER_DELAY_MS", "500"))
 
 # R-multiple calculation: assumed stop loss fraction (1% = 0.01)
 ASSUMED_STOP_FRACTION = float(os.getenv("ASSUMED_STOP_FRACTION", "0.01"))
@@ -118,9 +153,32 @@ async def lifespan(app: FastAPI):
             )
         print("[hl-decide] episode_fill_ids table ready for deduplication")
 
-        # Initialize ATR provider for dynamic stop distances
+        # Initialize ATR provider for dynamic stop distances (legacy)
         app.state.atr_provider = init_atr_provider(app.state.db)
         print("[hl-decide] ATR provider initialized")
+
+        # Initialize multi-exchange ATR manager (Phase 6.1)
+        app.state.atr_manager = init_atr_manager(
+            pool=app.state.db,
+            testnet=EXCHANGE_TESTNET,
+        )
+        print("[hl-decide] Multi-exchange ATR manager initialized")
+
+        # Initialize dynamic fee provider (Phase 6.1)
+        app.state.fee_provider = init_fee_provider(testnet=EXCHANGE_TESTNET)
+        print("[hl-decide] Dynamic fee provider initialized")
+
+        # Initialize funding rate provider (Phase 6.1)
+        app.state.funding_provider = init_funding_provider(testnet=EXCHANGE_TESTNET)
+        print("[hl-decide] Funding rate provider initialized")
+
+        # Initialize slippage estimation provider (Phase 6.1)
+        app.state.slippage_provider = init_slippage_provider(testnet=EXCHANGE_TESTNET)
+        print("[hl-decide] Slippage provider initialized")
+
+        # Initialize account normalizer for multi-exchange equity normalization (Phase 6.1.5)
+        app.state.account_normalizer = await init_account_normalizer()
+        print("[hl-decide] Account normalizer initialized")
 
         # Initialize correlation provider and hydrate consensus detector
         app.state.corr_provider = init_correlation_provider(app.state.db)
@@ -163,6 +221,39 @@ async def lifespan(app: FastAPI):
         # Load initial ATR data for consensus detector
         await update_atr_for_consensus()
 
+        # Load initial funding rates for EV calculation
+        await update_funding_for_consensus()
+
+        # Load initial orderbooks for slippage estimation
+        await update_orderbooks_for_slippage()
+
+        # Initialize hold time estimator (dynamic hold time from episode data)
+        app.state.hold_time_estimator = await init_hold_time_estimator(app.state.db)
+
+        # Initialize exchange manager (auto-detects configured exchanges)
+        app.state.exchange_manager = await init_exchange_manager(
+            exchanges=None,  # Auto-detect from env vars (HL_PRIVATE_KEY, ASTER_PRIVATE_KEY, BYBIT_API_KEY)
+            testnet=EXCHANGE_TESTNET,
+        )
+        # Set database pool for telemetry persistence (Phase 6)
+        app.state.exchange_manager.set_db_pool(app.state.db)
+        connected = app.state.exchange_manager.connected_exchanges
+        if connected:
+            print(f"[hl-decide] Exchange manager initialized: {[e.value for e in connected]}")
+            # Initial balance snapshot
+            await app.state.exchange_manager.update_all_balances()
+        else:
+            print("[hl-decide] Exchange manager ready (no exchanges configured - execution disabled)")
+
+        # Configure consensus detector with target exchange for accurate fee calculation
+        try:
+            exec_config = await get_execution_config(db=app.state.db)
+            target_exchange = exec_config.get("exchange", "hyperliquid").lower()
+            consensus_detector.set_target_exchange(target_exchange)
+            print(f"[hl-decide] Consensus EV gate using {target_exchange} fees")
+        except Exception as e:
+            print(f"[hl-decide] Could not set target exchange for consensus: {e}")
+
         # Connect to NATS
         app.state.nc = await nats.connect(NATS_URL)
         app.state.js = app.state.nc.jetstream()
@@ -173,8 +264,10 @@ async def lifespan(app: FastAPI):
         # Start periodic background tasks
         app.state.reconcile_task = asyncio.create_task(periodic_reconciliation_task())
         app.state.corr_refresh_task = asyncio.create_task(periodic_correlation_refresh_task())
+        app.state.exchange_health_task = asyncio.create_task(periodic_exchange_health_task())
         print(f"[hl-decide] Periodic reconciliation scheduled every {RECONCILE_INTERVAL_HOURS} hours")
         print(f"[hl-decide] Correlation refresh scheduled every {CORR_REFRESH_INTERVAL_HOURS} hours")
+        print(f"[hl-decide] Exchange health check scheduled every {EXCHANGE_HEALTH_CHECK_INTERVAL_MINUTES} minutes")
 
         print("[hl-decide] Started with position-based tracking, ATR stops, and correlation matrix")
     except Exception as e:
@@ -185,7 +278,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     # Cancel periodic background tasks
-    for task_name in ["reconcile_task", "corr_refresh_task"]:
+    for task_name in ["reconcile_task", "corr_refresh_task", "exchange_health_task"]:
         if hasattr(app.state, task_name):
             task = getattr(app.state, task_name)
             task.cancel()
@@ -194,6 +287,10 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
 
+    if hasattr(app.state, "account_normalizer"):
+        await app.state.account_normalizer.close()
+    if hasattr(app.state, "exchange_manager"):
+        await app.state.exchange_manager.disconnect_all()
     if hasattr(app.state, "nc"):
         await app.state.nc.drain()
     if hasattr(app.state, "db"):
@@ -1041,16 +1138,30 @@ async def update_atr_for_consensus() -> None:
     Called on startup and periodically to refresh volatility data.
     Updates both the consensus detector and episode tracker with
     current ATR-based stop distances, adjusted for market regime.
+
+    Phase 6.1: Uses the multi-exchange ATR manager to fetch ATR from
+    the target exchange when possible, falling back to Hyperliquid.
     """
     from .regime import get_regime_detector, get_regime_adjusted_stop, MarketRegime
 
     try:
+        # Get both legacy provider and new manager
         atr_provider = get_atr_provider()
+        atr_manager = get_atr_manager()
         regime_detector = get_regime_detector(app.state.db)
 
+        # Get target exchange from consensus detector
+        target_exchange = consensus_detector.target_exchange
+
         for symbol in ["BTC", "ETH"]:
-            atr_data = await atr_provider.get_atr(symbol)
-            base_stop_fraction = atr_provider.get_stop_fraction(atr_data)
+            # Phase 6.1: Try target exchange first via ATR manager
+            # Falls back to Hyperliquid if target unavailable
+            atr_data = await atr_manager.get_atr(
+                symbol,
+                exchange=target_exchange,
+                fallback_to_default=True,
+            )
+            base_stop_fraction = atr_manager.get_stop_fraction(atr_data)
 
             # Get current regime and adjust stop fraction
             regime_analysis = await regime_detector.detect_regime(symbol)
@@ -1067,13 +1178,20 @@ async def update_atr_for_consensus() -> None:
                 atr_fallback_counter.labels(asset=symbol, source=atr_data.source).inc()
 
             # Check if gating should be blocked (strict mode)
-            should_block, block_reason = atr_provider.should_block_gate(atr_data)
+            should_block, block_reason = atr_manager.should_block_gate(atr_data)
             if should_block:
                 atr_blocked_counter.labels(asset=symbol).inc()
                 print(f"[hl-decide] ATR BLOCKED for {symbol}: {block_reason}")
 
-            # Update consensus detector
-            consensus_detector.set_stop_fraction(symbol, stop_fraction)
+            # Update consensus detector with ATR validity for price gate
+            is_valid_for_gating = not should_block
+            validity_reason = block_reason if should_block else f"ATR from {atr_data.exchange}"
+            consensus_detector.set_stop_fraction(
+                symbol,
+                stop_fraction,
+                is_valid_for_gating=is_valid_for_gating,
+                validity_reason=validity_reason,
+            )
 
             # Update episode tracker config
             # Note: Episode tracker uses a shared config, so update default_stop_fraction
@@ -1081,11 +1199,83 @@ async def update_atr_for_consensus() -> None:
             episode_config.default_stop_fraction = stop_fraction
 
             regime_str = regime.value if regime else "unknown"
-            print(f"[hl-decide] {symbol} ATR stop: {stop_fraction*100:.2f}% (base: {base_stop_fraction*100:.2f}%, regime: {regime_str}, source: {atr_data.source})")
+            exchange_note = f"exchange={atr_data.exchange}" if target_exchange != "hyperliquid" else ""
+            print(f"[hl-decide] {symbol} ATR stop: {stop_fraction*100:.2f}% (base: {base_stop_fraction*100:.2f}%, regime: {regime_str}, source: {atr_data.source}{', ' + exchange_note if exchange_note else ''})")
 
     except Exception as e:
         print(f"[hl-decide] Failed to update ATR for consensus: {e}")
         # Keep using default 1% stops on error
+
+
+async def update_funding_for_consensus() -> None:
+    """
+    Pre-fetch and cache funding rates for consensus detection.
+
+    Called on startup and periodically to refresh funding rate data.
+    The cached data is used by get_funding_cost_bps_sync() in the
+    EV calculation during consensus detection.
+
+    Phase 6.1: Uses the funding provider to fetch from exchange APIs.
+    """
+    try:
+        funding_provider = get_funding_provider()
+        target_exchange = consensus_detector.target_exchange
+
+        for asset in ["BTC", "ETH"]:
+            # Fetch and cache funding rate
+            funding_data = await funding_provider.get_funding(
+                asset=asset,
+                exchange=target_exchange,
+                force_refresh=True,
+            )
+
+            daily_cost = funding_data.daily_cost_bps
+            source = funding_data.source
+            print(
+                f"[hl-decide] {asset} funding: {funding_data.rate_bps:.2f} bps/{funding_data.interval_hours}h "
+                f"({daily_cost:.2f} bps/day, source={source}, exchange={target_exchange})"
+            )
+
+    except Exception as e:
+        print(f"[hl-decide] Failed to update funding rates: {e}")
+        # Sync function will use defaults on cache miss
+
+
+async def update_orderbooks_for_slippage() -> None:
+    """
+    Pre-fetch and cache orderbook data for slippage estimation.
+
+    Called on startup and periodically to refresh orderbook data.
+    The cached data is used by get_slippage_estimate_bps_sync() in the
+    EV calculation during consensus detection.
+
+    Phase 6.1: Uses the slippage provider to fetch orderbooks from exchange APIs.
+    """
+    try:
+        slippage_provider = get_slippage_provider()
+        target_exchange = consensus_detector.target_exchange
+
+        for asset in ["BTC", "ETH"]:
+            # Fetch and cache orderbook
+            orderbook = await slippage_provider.get_orderbook(
+                asset=asset,
+                exchange=target_exchange,
+                force_refresh=True,
+            )
+
+            if orderbook is not None:
+                print(
+                    f"[hl-decide] {asset} orderbook: spread={orderbook.spread_bps:.2f} bps, "
+                    f"bid_depth=${orderbook.get_bid_depth_usd(5)/1000:.0f}k, "
+                    f"ask_depth=${orderbook.get_ask_depth_usd(5)/1000:.0f}k "
+                    f"(source={orderbook.source}, exchange={target_exchange})"
+                )
+            else:
+                print(f"[hl-decide] {asset} orderbook: unavailable, using static slippage estimates")
+
+    except Exception as e:
+        print(f"[hl-decide] Failed to update orderbooks: {e}")
+        # Sync function will use static defaults on cache miss
 
 
 async def restore_state() -> tuple[int, int]:
@@ -1372,6 +1562,79 @@ async def periodic_correlation_refresh_task():
             print(f"[hl-decide] Correlation refresh error: {e}")
             # Continue running despite errors
             await asyncio.sleep(300)  # Wait 5 minutes before retrying
+
+
+async def periodic_exchange_health_task():
+    """
+    Background task that periodically checks exchange health and updates balances.
+
+    Runs every EXCHANGE_HEALTH_CHECK_INTERVAL_MINUTES (default 5 minutes) to:
+    - Probe each connected exchange with a balance request
+    - Attempt reconnection if an exchange is disconnected or stale
+    - Update exchange_balances table with latest balances
+    - Update exchange_connections table with health status
+
+    This ensures the system can detect and recover from:
+    - Network interruptions
+    - Exchange API outages
+    - Session expiration
+    """
+    interval_seconds = EXCHANGE_HEALTH_CHECK_INTERVAL_MINUTES * 60
+
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+
+            if not hasattr(app.state, "exchange_manager"):
+                continue
+
+            exchange_manager = app.state.exchange_manager
+            if not exchange_manager.connected_exchanges:
+                # No exchanges configured - nothing to check
+                continue
+
+            # Run health check with reconnection attempts
+            # Rate limiting: stagger requests to avoid hitting venue API limits
+            result = await exchange_manager.health_check(
+                testnet=EXCHANGE_TESTNET,
+                stagger_delay_ms=EXCHANGE_HEALTH_STAGGER_DELAY_MS,
+            )
+
+            # Log results
+            connected_count = sum(
+                1 for ex, status in result.items()
+                if isinstance(status, dict) and status.get("healthy")
+            )
+            total_count = sum(
+                1 for ex, status in result.items()
+                if isinstance(status, dict)
+            )
+            reconnected = result.get("reconnected", [])
+
+            if reconnected:
+                print(
+                    f"[hl-decide] Exchange health check: {connected_count}/{total_count} healthy, "
+                    f"reconnected: {reconnected}"
+                )
+            else:
+                # Only log if there's something notable (not all healthy)
+                if connected_count < total_count:
+                    unhealthy = [
+                        ex for ex, status in result.items()
+                        if isinstance(status, dict) and not status.get("healthy")
+                    ]
+                    print(
+                        f"[hl-decide] Exchange health check: {connected_count}/{total_count} healthy, "
+                        f"unhealthy: {unhealthy}"
+                    )
+
+        except asyncio.CancelledError:
+            print("[hl-decide] Exchange health check task cancelled")
+            break
+        except Exception as e:
+            print(f"[hl-decide] Exchange health check error: {e}")
+            # Continue running despite errors
+            await asyncio.sleep(60)  # Wait 1 minute before retrying
 
 
 def enforce_limits():

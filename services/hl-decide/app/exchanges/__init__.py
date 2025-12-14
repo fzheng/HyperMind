@@ -23,6 +23,9 @@ from .interface import (
     Balance,
     ExchangeConfig,
     ExchangeType,
+    FeeConfig,
+    get_fee_config,
+    EXCHANGE_FEES,
 )
 from .interface import (
     MarginMode,
@@ -55,6 +58,10 @@ __all__ = [
     "Balance",
     "ExchangeConfig",
     "ExchangeType",
+    # Fee config
+    "FeeConfig",
+    "get_fee_config",
+    "EXCHANGE_FEES",
     # Enums
     "OrderSide",
     "OrderType",

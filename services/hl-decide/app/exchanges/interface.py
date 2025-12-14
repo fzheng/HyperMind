@@ -55,6 +55,58 @@ class MarginMode(str, Enum):
 
 
 @dataclass
+class FeeConfig:
+    """
+    Fee structure for an exchange.
+
+    Fees are specified in basis points (bps). 1 bps = 0.01% = 0.0001.
+    """
+    maker_fee_bps: float = 2.5  # Default: 2.5 bps = 0.025%
+    taker_fee_bps: float = 5.0  # Default: 5.0 bps = 0.05%
+    funding_rate_hourly_bps: float = 0.0  # Typically ~1 bps/8h
+
+    @property
+    def maker_fee_pct(self) -> float:
+        """Maker fee as percentage (0.01 = 1%)."""
+        return self.maker_fee_bps / 10000
+
+    @property
+    def taker_fee_pct(self) -> float:
+        """Taker fee as percentage (0.01 = 1%)."""
+        return self.taker_fee_bps / 10000
+
+    def round_trip_cost_bps(self, is_maker_entry: bool = False, is_maker_exit: bool = False) -> float:
+        """
+        Calculate round-trip fee cost in basis points.
+
+        Most market orders are taker orders. Limit orders may get maker rebates.
+
+        Args:
+            is_maker_entry: Whether entry order is maker
+            is_maker_exit: Whether exit order is maker
+
+        Returns:
+            Total round-trip cost in bps
+        """
+        entry_fee = self.maker_fee_bps if is_maker_entry else self.taker_fee_bps
+        exit_fee = self.maker_fee_bps if is_maker_exit else self.taker_fee_bps
+        return entry_fee + exit_fee
+
+
+# Default fee configs for known exchanges
+EXCHANGE_FEES: dict[ExchangeType, FeeConfig] = {
+    ExchangeType.HYPERLIQUID: FeeConfig(maker_fee_bps=2.5, taker_fee_bps=5.0),
+    ExchangeType.ASTER: FeeConfig(maker_fee_bps=2.5, taker_fee_bps=5.0),  # Similar to HL
+    ExchangeType.BYBIT: FeeConfig(maker_fee_bps=10.0, taker_fee_bps=6.0),  # VIP0 rates
+}
+
+
+def get_fee_config(exchange_type: ExchangeType) -> FeeConfig:
+    """Get fee config for an exchange type."""
+    return EXCHANGE_FEES.get(exchange_type, FeeConfig())
+
+
+@dataclass
 class ExchangeConfig:
     """
     Configuration for exchange connection.
@@ -75,8 +127,17 @@ class ExchangeConfig:
     default_margin_mode: MarginMode = MarginMode.CROSS
     default_slippage_pct: float = 0.5  # 0.5%
 
+    # Fee structure (can be overridden per-user for VIP tiers)
+    fees: Optional[FeeConfig] = None
+
     # Rate limiting
     max_requests_per_second: int = 10
+
+    def get_fees(self) -> FeeConfig:
+        """Get fee config, falling back to exchange defaults."""
+        if self.fees:
+            return self.fees
+        return get_fee_config(self.exchange_type)
 
     def get_private_key(self) -> Optional[str]:
         """Get private key from environment."""

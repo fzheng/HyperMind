@@ -36,12 +36,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AggregatedBalance:
-    """Balance aggregated across all connected exchanges."""
-    total_equity: float
-    available_balance: float
-    margin_used: float
-    unrealized_pnl: float
-    per_exchange: dict[str, Balance]
+    """
+    Balance aggregated across all connected exchanges.
+
+    All values are USD-normalized (Phase 6.1).
+    USDT balances are converted to USD using AccountNormalizer.
+    """
+    total_equity: float  # USD-normalized
+    available_balance: float  # USD-normalized
+    margin_used: float  # USD-normalized
+    unrealized_pnl: float  # USD-normalized
+    per_exchange: dict[str, Balance]  # Original per-exchange balances
     timestamp: datetime
 
 
@@ -63,6 +68,7 @@ class ExchangeManager:
     - Unified position/balance queries across exchanges
     - Execution routing based on configuration
     - Symbol normalization per exchange
+    - Database persistence for connection status and balances (Phase 6)
 
     Usage:
         manager = ExchangeManager()
@@ -80,10 +86,16 @@ class ExchangeManager:
         )
     """
 
-    def __init__(self):
-        """Initialize exchange manager."""
+    def __init__(self, db_pool=None):
+        """
+        Initialize exchange manager.
+
+        Args:
+            db_pool: Optional asyncpg connection pool for telemetry persistence
+        """
         self._exchanges: dict[ExchangeType, ExchangeInterface] = {}
         self._default_exchange: Optional[ExchangeType] = None
+        self._db_pool = db_pool
 
     @property
     def connected_exchanges(self) -> list[ExchangeType]:
@@ -141,6 +153,7 @@ class ExchangeManager:
 
             if not exchange.is_configured:
                 logger.warning(f"Exchange {exchange_type} not configured (missing credentials)")
+                await self.persist_connection_status(exchange_type, False, testnet, "Not configured")
                 return False
 
             if await exchange.connect():
@@ -150,13 +163,16 @@ class ExchangeManager:
                     self._default_exchange = exchange_type
 
                 logger.info(f"Connected to {exchange_type.value}")
+                await self.persist_connection_status(exchange_type, True, testnet)
                 return True
             else:
                 logger.error(f"Failed to connect to {exchange_type.value}")
+                await self.persist_connection_status(exchange_type, False, testnet, "Connection failed")
                 return False
 
         except Exception as e:
             logger.error(f"Error connecting to {exchange_type}: {e}")
+            await self.persist_connection_status(exchange_type, False, testnet, str(e))
             return False
 
     async def disconnect_exchange(self, exchange_type: ExchangeType) -> None:
@@ -178,6 +194,7 @@ class ExchangeManager:
                 else:
                     self._default_exchange = None
 
+            await self.persist_connection_status(exchange_type, False, error="Disconnected")
             logger.info(f"Disconnected from {exchange_type.value}")
 
     async def disconnect_all(self) -> None:
@@ -206,8 +223,11 @@ class ExchangeManager:
         """
         Get aggregated balance across all connected exchanges.
 
+        All values are USD-normalized (Phase 6.1).
+        USDT balances from Bybit are converted to USD using AccountNormalizer.
+
         Returns:
-            AggregatedBalance with totals and per-exchange breakdown
+            AggregatedBalance with USD-normalized totals and per-exchange breakdown
         """
         if not self._exchanges:
             return None
@@ -218,6 +238,10 @@ class ExchangeManager:
         margin_used = 0.0
         unrealized_pnl = 0.0
 
+        # Lazy import to avoid circular dependency (Phase 6.1)
+        from ..account_normalizer import get_account_normalizer
+        normalizer = get_account_normalizer()
+
         for ex_type, exchange in self._exchanges.items():
             if not exchange.is_connected:
                 continue
@@ -225,10 +249,14 @@ class ExchangeManager:
             balance = await exchange.get_balance()
             if balance:
                 balances[ex_type.value] = balance
-                total_equity += balance.total_equity
-                available_balance += balance.available_balance
-                margin_used += balance.margin_used
-                unrealized_pnl += balance.unrealized_pnl
+
+                # Normalize balance to USD (handles USDT -> USD for Bybit)
+                normalized = normalizer.normalize_balance_sync(balance)
+
+                total_equity += normalized.total_equity_usd
+                available_balance += normalized.available_balance_usd
+                margin_used += normalized.margin_used_usd
+                unrealized_pnl += normalized.unrealized_pnl_usd
 
         if not balances:
             return None
@@ -621,6 +649,205 @@ class ExchangeManager:
         for suffix in ["-PERP", "/USDT", "/USD", "-USD", "USDT"]:
             symbol = symbol.replace(suffix, "")
         return symbol
+
+    # Database Persistence Methods (Phase 6)
+
+    def set_db_pool(self, db_pool) -> None:
+        """Set database pool for telemetry persistence."""
+        self._db_pool = db_pool
+
+    async def persist_connection_status(
+        self,
+        exchange_type: ExchangeType,
+        is_connected: bool,
+        testnet: bool = True,
+        error: Optional[str] = None,
+    ) -> None:
+        """
+        Persist exchange connection status to database.
+
+        Args:
+            exchange_type: Exchange identifier
+            is_connected: Current connection status
+            testnet: Whether using testnet
+            error: Error message if failed
+        """
+        if not self._db_pool:
+            return
+
+        try:
+            async with self._db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO exchange_connections
+                    (exchange_type, testnet, is_connected, last_connected_at, last_error, updated_at)
+                    VALUES ($1, $2, $3, CASE WHEN $3 THEN NOW() ELSE NULL END, $4, NOW())
+                    ON CONFLICT (exchange_type, testnet) DO UPDATE SET
+                        is_connected = EXCLUDED.is_connected,
+                        last_connected_at = CASE WHEN EXCLUDED.is_connected THEN NOW() ELSE exchange_connections.last_connected_at END,
+                        last_error = EXCLUDED.last_error,
+                        updated_at = NOW()
+                    """,
+                    exchange_type.value,
+                    testnet,
+                    is_connected,
+                    error,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to persist connection status: {e}")
+
+    async def persist_balance(
+        self,
+        exchange_type: ExchangeType,
+        balance: Balance,
+    ) -> None:
+        """
+        Persist exchange balance to database.
+
+        Args:
+            exchange_type: Exchange identifier
+            balance: Balance data
+        """
+        if not self._db_pool:
+            return
+
+        try:
+            async with self._db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO exchange_balances
+                    (exchange_type, total_equity, available_balance, margin_used, unrealized_pnl, timestamp)
+                    VALUES ($1, $2, $3, $4, $5, NOW())
+                    ON CONFLICT (exchange_type) DO UPDATE SET
+                        total_equity = EXCLUDED.total_equity,
+                        available_balance = EXCLUDED.available_balance,
+                        margin_used = EXCLUDED.margin_used,
+                        unrealized_pnl = EXCLUDED.unrealized_pnl,
+                        timestamp = NOW()
+                    """,
+                    exchange_type.value,
+                    balance.total_equity,
+                    balance.available_balance,
+                    balance.margin_used,
+                    balance.unrealized_pnl,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to persist balance: {e}")
+
+    async def update_all_balances(self) -> None:
+        """
+        Update balance records for all connected exchanges.
+
+        Call periodically to maintain telemetry data.
+        """
+        for ex_type, exchange in self._exchanges.items():
+            if exchange.is_connected:
+                try:
+                    balance = await exchange.get_balance()
+                    if balance:
+                        await self.persist_balance(ex_type, balance)
+                except Exception as e:
+                    logger.warning(f"Failed to update balance for {ex_type}: {e}")
+
+    async def health_check(
+        self,
+        testnet: bool = True,
+        stagger_delay_ms: int = 500,
+    ) -> dict[str, Any]:
+        """
+        Check health of all exchanges and attempt reconnection if needed.
+
+        Probes each connected exchange by fetching balance/positions.
+        If an exchange fails the probe, attempts to reconnect.
+
+        Rate limiting: Adds a configurable delay between probing each exchange
+        to prevent hitting API rate limits when multiple exchanges are configured.
+
+        Args:
+            testnet: Whether using testnet (for reconnection attempts)
+            stagger_delay_ms: Delay in ms between checking each exchange (default 500ms)
+
+        Returns:
+            Dict with health status per exchange:
+            {
+                "hyperliquid": {"connected": True, "healthy": True, "error": None},
+                "bybit": {"connected": False, "healthy": False, "error": "Timeout"},
+                "reconnected": ["bybit"],
+                "timestamp": "2024-01-15T10:30:00Z"
+            }
+        """
+        results: dict[str, Any] = {
+            "reconnected": [],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        exchange_list = list(self._exchanges.items())
+        for i, (ex_type, exchange) in enumerate(exchange_list):
+            # Rate limiting: add delay between exchanges (except first)
+            if i > 0 and stagger_delay_ms > 0:
+                await asyncio.sleep(stagger_delay_ms / 1000)
+            status = {
+                "connected": exchange.is_connected,
+                "healthy": False,
+                "error": None,
+            }
+
+            if not exchange.is_connected:
+                # Exchange was disconnected - try to reconnect
+                logger.info(f"Health check: {ex_type.value} disconnected, attempting reconnect...")
+                try:
+                    if await exchange.connect():
+                        status["connected"] = True
+                        results["reconnected"].append(ex_type.value)
+                        logger.info(f"Health check: {ex_type.value} reconnected successfully")
+                    else:
+                        status["error"] = "Reconnection failed"
+                except Exception as e:
+                    status["error"] = str(e)
+                    logger.warning(f"Health check: {ex_type.value} reconnection error: {e}")
+
+            if status["connected"]:
+                # Probe the exchange with a lightweight request
+                try:
+                    balance = await exchange.get_balance()
+                    if balance is not None:
+                        status["healthy"] = True
+                        # Update balance while we have it
+                        await self.persist_balance(ex_type, balance)
+                    else:
+                        status["error"] = "Balance returned None"
+                        status["healthy"] = False
+                except Exception as e:
+                    status["error"] = str(e)
+                    status["healthy"] = False
+                    logger.warning(f"Health check: {ex_type.value} probe failed: {e}")
+
+                    # If probe failed, the connection may be stale - try reconnect
+                    if exchange.is_connected:
+                        logger.info(f"Health check: {ex_type.value} connection stale, reconnecting...")
+                        try:
+                            await exchange.disconnect()
+                            if await exchange.connect():
+                                results["reconnected"].append(ex_type.value)
+                                status["connected"] = True
+                                status["healthy"] = True
+                                status["error"] = None
+                                logger.info(f"Health check: {ex_type.value} reconnected after stale connection")
+                        except Exception as reconnect_error:
+                            status["error"] = f"Reconnection failed: {reconnect_error}"
+                            logger.warning(f"Health check: {ex_type.value} reconnection failed: {reconnect_error}")
+
+            # Persist connection status
+            await self.persist_connection_status(
+                ex_type,
+                status["healthy"],
+                testnet,
+                status["error"],
+            )
+
+            results[ex_type.value] = status
+
+        return results
 
 
 # Singleton instance

@@ -2,6 +2,7 @@
 Market Regime Detection
 
 Phase 5: Adaptive strategy parameters based on market conditions.
+Phase 6.1: Multi-exchange support via ATR provider infrastructure.
 
 Detects three market regimes:
 1. TRENDING: Strong directional moves with momentum
@@ -29,6 +30,10 @@ from typing import Optional, Dict, List, Tuple
 from functools import lru_cache
 
 import asyncpg
+
+# Import ATR provider infrastructure for multi-exchange candle fetching
+from .atr_provider.interface import Candle, ATRProviderInterface
+from .atr_provider.manager import get_atr_manager
 
 
 # Configuration
@@ -121,6 +126,7 @@ class RegimeAnalysis:
     timestamp: datetime
     candles_used: int
     source: str  # 'full', 'partial', 'fallback'
+    exchange: str = "hyperliquid"  # Source exchange for candle data
 
     @property
     def is_valid(self) -> bool:
@@ -133,6 +139,7 @@ class RegimeAnalysis:
             "asset": self.asset,
             "regime": self.regime.value,
             "confidence": round(self.confidence, 2),
+            "exchange": self.exchange,
             "params": {
                 "stop_multiplier": self.params.stop_multiplier,
                 "kelly_multiplier": self.params.kelly_multiplier,
@@ -158,52 +165,73 @@ class RegimeDetector:
     2. Volatility level (high vs low)
     3. Price range compression (breakout potential)
 
+    Phase 6.1: Multi-exchange support via ATR provider infrastructure.
+    Candles are fetched via the ATR manager's exchange-specific providers.
+
     Usage:
         detector = RegimeDetector(db_pool)
-        analysis = await detector.detect_regime("BTC")
+        analysis = await detector.detect_regime("BTC")  # Uses default exchange
+        analysis = await detector.detect_regime("BTC", exchange="bybit")
         params = analysis.params
     """
 
-    def __init__(self, db: Optional[asyncpg.Pool] = None):
+    def __init__(self, db: Optional[asyncpg.Pool] = None, default_exchange: str = "hyperliquid"):
         """
         Initialize regime detector.
 
         Args:
-            db: Database pool for price data access
+            db: Database pool for price data access (used for HL fallback)
+            default_exchange: Default exchange for candle data (hyperliquid, bybit)
         """
         self.db = db
+        self.default_exchange = default_exchange.lower()
         self._cache: Dict[str, Tuple[RegimeAnalysis, datetime]] = {}
 
-    async def detect_regime(self, asset: str) -> RegimeAnalysis:
+    async def detect_regime(
+        self,
+        asset: str,
+        exchange: Optional[str] = None,
+    ) -> RegimeAnalysis:
         """
         Detect current market regime for an asset.
 
         Args:
             asset: Asset symbol (BTC, ETH)
+            exchange: Exchange to use for candle data (uses default if None)
 
         Returns:
             RegimeAnalysis with detected regime and parameters
         """
-        # Check cache
-        cached = self._get_cached(asset)
+        target_exchange = (exchange or self.default_exchange).lower()
+
+        # Check cache with exchange-specific key
+        cache_key = f"{asset.upper()}:{target_exchange}"
+        cached = self._get_cached(cache_key)
         if cached:
             return cached
 
-        # Fetch price data
-        candles = await self._fetch_candles(asset, minutes=max(REGIME_MA_LONG + 10, REGIME_LOOKBACK_MINUTES))
+        # Fetch price data via ATR provider infrastructure
+        candles = await self._fetch_candles_multi_exchange(
+            asset,
+            exchange=target_exchange,
+            count=max(REGIME_MA_LONG + 10, REGIME_LOOKBACK_MINUTES),
+        )
 
         if len(candles) < REGIME_MIN_CANDLES:
-            analysis = self._create_unknown_regime(asset, len(candles))
-            self._cache_result(asset, analysis)
+            analysis = self._create_unknown_regime(asset, len(candles), target_exchange)
+            self._cache_result(cache_key, analysis)
             return analysis
 
+        # Convert Candle objects to dict format for calculations
+        candle_dicts = self._candles_to_dicts(candles)
+
         # Calculate signals
-        ma_short = self._calculate_ma(candles, REGIME_MA_SHORT)
-        ma_long = self._calculate_ma(candles, REGIME_MA_LONG)
-        current_vol = self._calculate_volatility(candles, lookback=14)
-        historical_vol = self._calculate_volatility(candles, lookback=min(len(candles), 50))
-        price_range = self._calculate_price_range(candles, lookback=20)
-        current_price = candles[-1]["close"]
+        ma_short = self._calculate_ma(candle_dicts, REGIME_MA_SHORT)
+        ma_long = self._calculate_ma(candle_dicts, REGIME_MA_LONG)
+        current_vol = self._calculate_volatility(candle_dicts, lookback=14)
+        historical_vol = self._calculate_volatility(candle_dicts, lookback=min(len(candle_dicts), 50))
+        price_range = self._calculate_price_range(candle_dicts, lookback=20)
+        current_price = candle_dicts[-1]["close"]
 
         # Calculate signal values
         ma_spread_pct = None
@@ -234,11 +262,12 @@ class RegimeDetector:
             volatility_ratio=volatility_ratio,
             price_range_pct=price_range_pct,
             timestamp=datetime.now(timezone.utc),
-            candles_used=len(candles),
-            source="full" if len(candles) >= REGIME_MA_LONG else "partial",
+            candles_used=len(candle_dicts),
+            source="full" if len(candle_dicts) >= REGIME_MA_LONG else "partial",
+            exchange=target_exchange,
         )
 
-        self._cache_result(asset, analysis)
+        self._cache_result(cache_key, analysis)
         return analysis
 
     def _classify_regime(
@@ -314,8 +343,67 @@ class RegimeDetector:
 
         return max_regime, min(confidence, 0.95)
 
-    async def _fetch_candles(self, asset: str, minutes: int) -> List[dict]:
-        """Fetch recent candles from database."""
+    async def _fetch_candles_multi_exchange(
+        self,
+        asset: str,
+        exchange: str,
+        count: int,
+    ) -> List[Candle]:
+        """
+        Fetch candles via ATR provider infrastructure.
+
+        Uses exchange-specific ATR providers which have their own candle fetching.
+        Falls back to Hyperliquid DB for historical compatibility.
+
+        Args:
+            asset: Asset symbol (BTC, ETH)
+            exchange: Target exchange (hyperliquid, bybit)
+            count: Number of candles to fetch
+
+        Returns:
+            List of Candle objects
+        """
+        try:
+            # Get ATR manager and appropriate provider
+            atr_manager = get_atr_manager()
+            provider = atr_manager.get_provider(exchange)
+
+            if provider and provider.is_configured:
+                # Use provider's candle fetching
+                candles = await provider.get_candles(asset, count=count)
+                if len(candles) >= REGIME_MIN_CANDLES:
+                    # Sort by timestamp ascending for calculations
+                    return sorted(candles, key=lambda c: c.ts)
+
+                print(
+                    f"[regime] {exchange} provider returned {len(candles)} candles "
+                    f"(need {REGIME_MIN_CANDLES}), trying fallback"
+                )
+
+            # Fallback to Hyperliquid DB if target not available
+            if exchange != "hyperliquid" and self.db:
+                print(f"[regime] Falling back to hyperliquid DB for {asset} candles")
+                return await self._fetch_candles_from_db(asset, count)
+
+            # Direct DB fetch for hyperliquid
+            if self.db:
+                return await self._fetch_candles_from_db(asset, count)
+
+            return []
+
+        except Exception as e:
+            print(f"[regime] Error fetching candles for {asset} on {exchange}: {e}")
+            # Last resort: try direct DB
+            if self.db:
+                return await self._fetch_candles_from_db(asset, count)
+            return []
+
+    async def _fetch_candles_from_db(self, asset: str, count: int) -> List[Candle]:
+        """
+        Fetch candles from marks_1m database (Hyperliquid data).
+
+        Legacy method for backward compatibility and fallback.
+        """
         if not self.db:
             return []
 
@@ -323,30 +411,45 @@ class RegimeDetector:
             async with self.db.acquire() as conn:
                 rows = await conn.fetch(
                     """
-                    SELECT ts, mid, high, low, close, atr14
+                    SELECT ts, mid, high, low, close
                     FROM marks_1m
                     WHERE asset = $1
                       AND ts > NOW() - INTERVAL '1 minute' * $2
                     ORDER BY ts ASC
                     """,
                     asset,
-                    minutes,
+                    count,
                 )
-                return [
-                    {
-                        "ts": row["ts"],
-                        "open": float(row["mid"]) if row["mid"] else None,
-                        "high": float(row["high"]) if row["high"] else float(row["mid"]) if row["mid"] else None,
-                        "low": float(row["low"]) if row["low"] else float(row["mid"]) if row["mid"] else None,
-                        "close": float(row["close"]) if row["close"] else float(row["mid"]) if row["mid"] else None,
-                        "atr14": float(row["atr14"]) if row["atr14"] else None,
-                    }
-                    for row in rows
-                    if row["mid"] is not None
-                ]
+                candles = []
+                for row in rows:
+                    if row["mid"] is None:
+                        continue
+
+                    mid = float(row["mid"])
+                    candles.append(Candle(
+                        ts=row["ts"],
+                        open=mid,
+                        high=float(row["high"]) if row["high"] else mid,
+                        low=float(row["low"]) if row["low"] else mid,
+                        close=float(row["close"]) if row["close"] else mid,
+                    ))
+                return candles
         except Exception as e:
-            print(f"[regime] Failed to fetch candles: {e}")
+            print(f"[regime] Failed to fetch candles from DB: {e}")
             return []
+
+    def _candles_to_dicts(self, candles: List[Candle]) -> List[dict]:
+        """Convert Candle objects to dict format for calculation methods."""
+        return [
+            {
+                "ts": c.ts,
+                "open": c.open,
+                "high": c.high,
+                "low": c.low,
+                "close": c.close,
+            }
+            for c in candles
+        ]
 
     def _calculate_ma(self, candles: List[dict], period: int) -> Optional[float]:
         """Calculate simple moving average of close prices."""
@@ -403,12 +506,12 @@ class RegimeDetector:
 
         return max(highs) - min(lows)
 
-    def _get_cached(self, asset: str) -> Optional[RegimeAnalysis]:
+    def _get_cached(self, cache_key: str) -> Optional[RegimeAnalysis]:
         """Get cached regime analysis if still valid."""
-        if asset not in self._cache:
+        if cache_key not in self._cache:
             return None
 
-        analysis, cached_at = self._cache[asset]
+        analysis, cached_at = self._cache[cache_key]
         age = (datetime.now(timezone.utc) - cached_at).total_seconds()
 
         if age > REGIME_CACHE_TTL_SECONDS:
@@ -416,11 +519,16 @@ class RegimeDetector:
 
         return analysis
 
-    def _cache_result(self, asset: str, analysis: RegimeAnalysis) -> None:
+    def _cache_result(self, cache_key: str, analysis: RegimeAnalysis) -> None:
         """Cache regime analysis."""
-        self._cache[asset] = (analysis, datetime.now(timezone.utc))
+        self._cache[cache_key] = (analysis, datetime.now(timezone.utc))
 
-    def _create_unknown_regime(self, asset: str, candles_count: int) -> RegimeAnalysis:
+    def _create_unknown_regime(
+        self,
+        asset: str,
+        candles_count: int,
+        exchange: str = "hyperliquid",
+    ) -> RegimeAnalysis:
         """Create unknown regime analysis when data is insufficient."""
         return RegimeAnalysis(
             asset=asset,
@@ -433,12 +541,25 @@ class RegimeDetector:
             timestamp=datetime.now(timezone.utc),
             candles_used=candles_count,
             source="fallback",
+            exchange=exchange,
         )
 
-    def clear_cache(self, asset: Optional[str] = None) -> None:
-        """Clear regime cache."""
-        if asset:
-            self._cache.pop(asset, None)
+    def clear_cache(self, asset: Optional[str] = None, exchange: Optional[str] = None) -> None:
+        """
+        Clear regime cache.
+
+        Args:
+            asset: Specific asset to clear (clears all if None)
+            exchange: Specific exchange to clear (clears all if None)
+        """
+        if asset and exchange:
+            cache_key = f"{asset.upper()}:{exchange.lower()}"
+            self._cache.pop(cache_key, None)
+        elif asset:
+            # Clear all exchanges for this asset
+            keys_to_clear = [k for k in self._cache if k.startswith(f"{asset.upper()}:")]
+            for key in keys_to_clear:
+                self._cache.pop(key, None)
         else:
             self._cache.clear()
 
@@ -460,6 +581,7 @@ def get_regime_detector(db: Optional[asyncpg.Pool] = None) -> RegimeDetector:
 async def detect_market_regime(
     asset: str,
     db: Optional[asyncpg.Pool] = None,
+    exchange: Optional[str] = None,
 ) -> RegimeAnalysis:
     """
     Convenience function to detect market regime.
@@ -467,12 +589,13 @@ async def detect_market_regime(
     Args:
         asset: Asset symbol (BTC, ETH)
         db: Database pool
+        exchange: Target exchange for candle data (uses default if None)
 
     Returns:
         RegimeAnalysis with detected regime and parameters
     """
     detector = get_regime_detector(db)
-    return await detector.detect_regime(asset)
+    return await detector.detect_regime(asset, exchange=exchange)
 
 
 def get_regime_adjusted_kelly(

@@ -45,7 +45,9 @@ from .exchanges import (
     OrderResult as ExchangeOrderResult,
     OrderSide,
     get_exchange_manager,
+    get_fee_config,
 )
+from .account_normalizer import get_account_normalizer
 
 
 # Hyperliquid API endpoints
@@ -148,13 +150,38 @@ class HyperliquidExecutor:
             await self._http_client.aclose()
             self._http_client = None
 
-    async def get_account_state(self) -> Optional[dict]:
+    async def get_account_state(
+        self,
+        exchange_type: Optional[ExchangeType] = None,
+    ) -> Optional[dict]:
         """
-        Fetch account state from Hyperliquid.
+        Fetch account state from exchange.
+
+        If ExchangeManager has the exchange connected, uses that.
+        Falls back to direct Hyperliquid API for backward compatibility.
+
+        Args:
+            exchange_type: Target exchange (None = Hyperliquid)
 
         Returns:
             Account state dict or None if failed
         """
+        # Try ExchangeManager first (multi-exchange path)
+        if exchange_type is not None:
+            exchange_manager = get_exchange_manager()
+            exchange = exchange_manager.get_exchange(exchange_type)
+            if exchange and exchange.is_connected:
+                try:
+                    balance = await exchange.get_balance()
+                    positions = await exchange.get_positions()
+                    if balance:
+                        # Convert to Hyperliquid-like format for backward compatibility
+                        return self._to_hl_account_state(balance, positions)
+                except Exception as e:
+                    print(f"[executor] Failed to fetch from {exchange_type.value}: {e}")
+                    # Fall through to legacy path
+
+        # Legacy Hyperliquid API path
         if not self.address:
             return None
 
@@ -172,12 +199,65 @@ class HyperliquidExecutor:
             print(f"[executor] Failed to fetch account state: {e}")
             return None
 
-    async def get_account_state_with_retry(self) -> dict:
+    def _to_hl_account_state(self, balance, positions: list) -> dict:
+        """
+        Convert ExchangeManager balance/positions to Hyperliquid-like format.
+
+        This enables backward compatibility with existing risk checks.
+        All values are normalized to USD using AccountNormalizer (Phase 6.1.5).
+        """
+        # Normalize balance to USD (handles USDT → USD conversion for Bybit)
+        normalizer = get_account_normalizer()
+        normalized = normalizer.normalize_balance_sync(balance)
+
+        # Build assetPositions array
+        asset_positions = []
+        for pos in positions:
+            # Normalize position notional to USD
+            norm_pos = normalizer.normalize_position_sync(pos, quote_currency=balance.currency)
+            asset_positions.append({
+                "position": {
+                    "coin": pos.symbol,
+                    "szi": str(pos.size),
+                    "entryPx": str(pos.entry_price),
+                    "leverage": {"type": "isolated", "value": pos.leverage},
+                    "liquidationPx": str(pos.liquidation_price) if pos.liquidation_price else None,
+                    "unrealizedPnl": str(pos.unrealized_pnl * normalized.conversion_rate),
+                    "notionalValueUsd": str(norm_pos.notional_value_usd),  # Added for clarity
+                }
+            })
+
+        return {
+            "marginSummary": {
+                "accountValue": str(normalized.total_equity_usd),  # USD-normalized
+                "totalMarginUsed": str(normalized.margin_used_usd),  # USD-normalized
+                "totalNtlPos": str(sum(
+                    normalizer.normalize_position_sync(p, balance.currency).notional_value_usd
+                    for p in positions
+                )),
+            },
+            "assetPositions": asset_positions,
+            # Normalization metadata for audit trail
+            "_normalization": {
+                "original_currency": balance.currency,
+                "conversion_rate": normalized.conversion_rate,
+                "conversion_source": normalized.conversion_source,
+                "is_depeg_warning": normalized.is_depeg_warning,
+            },
+        }
+
+    async def get_account_state_with_retry(
+        self,
+        exchange_type: Optional[ExchangeType] = None,
+    ) -> dict:
         """
         Fetch account state with exponential backoff retry.
 
         Retries up to ACCOUNT_STATE_MAX_RETRIES times with exponential backoff.
         Raises exception if all retries fail (fail-closed behavior).
+
+        Args:
+            exchange_type: Target exchange (None = Hyperliquid)
 
         Returns:
             Account state dict
@@ -189,7 +269,7 @@ class HyperliquidExecutor:
 
         for attempt in range(ACCOUNT_STATE_MAX_RETRIES):
             try:
-                result = await self.get_account_state()
+                result = await self.get_account_state(exchange_type)
                 if result is not None:
                     return result
                 # get_account_state returned None - treat as failure
@@ -200,34 +280,47 @@ class HyperliquidExecutor:
             # Exponential backoff: 500ms, 1000ms, 2000ms
             if attempt < ACCOUNT_STATE_MAX_RETRIES - 1:
                 delay_ms = ACCOUNT_STATE_BASE_DELAY_MS * (2 ** attempt)
-                print(f"[executor] Account state fetch attempt {attempt + 1} failed, retrying in {delay_ms}ms...")
+                exchange_name = exchange_type.value if exchange_type else "hyperliquid"
+                print(f"[executor] Account state fetch from {exchange_name} attempt {attempt + 1} failed, retrying in {delay_ms}ms...")
                 await asyncio.sleep(delay_ms / 1000)
 
         # All retries exhausted
         raise Exception(f"Account state fetch failed after {ACCOUNT_STATE_MAX_RETRIES} attempts: {last_error}")
 
-    async def get_account_value(self) -> float:
+    async def get_account_value(
+        self,
+        exchange_type: Optional[ExchangeType] = None,
+    ) -> float:
         """
         Get current account value.
+
+        Args:
+            exchange_type: Target exchange (None = Hyperliquid)
 
         Returns:
             Account value in USD, or 0 if unavailable
         """
-        state = await self.get_account_state()
+        state = await self.get_account_state(exchange_type)
         if not state:
             return 0.0
 
         margin_summary = state.get("marginSummary", {})
         return float(margin_summary.get("accountValue", 0))
 
-    async def get_current_exposure(self) -> float:
+    async def get_current_exposure(
+        self,
+        exchange_type: Optional[ExchangeType] = None,
+    ) -> float:
         """
         Get current total exposure as fraction of equity.
+
+        Args:
+            exchange_type: Target exchange (None = Hyperliquid)
 
         Returns:
             Exposure ratio (0-1+), or 0 if unavailable
         """
-        state = await self.get_account_state()
+        state = await self.get_account_state(exchange_type)
         if not state:
             return 0.0
 
@@ -247,16 +340,37 @@ class HyperliquidExecutor:
 
         return total_notional / account_value
 
-    async def get_mid_price(self, symbol: str) -> Optional[float]:
+    async def get_mid_price(
+        self,
+        symbol: str,
+        exchange_type: Optional[ExchangeType] = None,
+    ) -> Optional[float]:
         """
         Get current mid price for a symbol.
 
         Args:
             symbol: Asset symbol (BTC, ETH)
+            exchange_type: Target exchange (None = Hyperliquid)
 
         Returns:
             Mid price or None if unavailable
         """
+        # Try ExchangeManager first (multi-exchange path)
+        if exchange_type is not None:
+            exchange_manager = get_exchange_manager()
+            exchange = exchange_manager.get_exchange(exchange_type)
+            if exchange and exchange.is_connected:
+                try:
+                    # Format symbol for exchange
+                    formatted_symbol = exchange.format_symbol(symbol)
+                    price = await exchange.get_market_price(formatted_symbol)
+                    if price:
+                        return price
+                except Exception as e:
+                    print(f"[executor] Failed to fetch price from {exchange_type.value}: {e}")
+                    # Fall through to legacy path
+
+        # Legacy Hyperliquid API path
         try:
             client = await self._get_client()
             payload = {"type": "allMids"}
@@ -283,10 +397,10 @@ class HyperliquidExecutor:
 
         Checks:
         1. Executor enabled
-        2. Hyperliquid enabled
-        3. Address configured
-        4. Exposure limits
-        5. Account has value
+        2. Exchange enabled and configured
+        3. Exposure limits
+        4. Account has value
+        5. Risk governor and circuit breaker
 
         Args:
             db: Database pool for Kelly data lookup
@@ -305,28 +419,51 @@ class HyperliquidExecutor:
         if not config.get("enabled"):
             return False, "Auto-trading disabled", context
 
-        # Check Hyperliquid enable
-        hl_config = config.get("hyperliquid", {})
-        if not hl_config.get("enabled"):
-            return False, "Hyperliquid trading disabled", context
+        # Determine target exchange (Phase 6: multi-exchange support)
+        exchange_type_str = config.get("exchange", "hyperliquid").lower()
+        try:
+            exchange_type = ExchangeType(exchange_type_str)
+        except ValueError:
+            exchange_type = ExchangeType.HYPERLIQUID
+        context["exchange"] = exchange_type.value
 
-        # Check address configured
-        address = hl_config.get("address")
-        if not address:
-            return False, "No Hyperliquid address configured", context
+        # Check if using ExchangeManager (multi-exchange path)
+        exchange_manager = get_exchange_manager()
+        exchange = exchange_manager.get_exchange(exchange_type)
+        using_exchange_manager = exchange is not None and exchange.is_connected
 
-        self.address = address
+        # Fall back to legacy Hyperliquid config if ExchangeManager not available
+        if not using_exchange_manager:
+            # Check Hyperliquid enable (legacy path)
+            hl_config = config.get("hyperliquid", {})
+            if not hl_config.get("enabled"):
+                return False, f"Exchange {exchange_type.value} not enabled", context
 
-        # Get account state
-        account_value = await self.get_account_value()
+            # Check address configured (legacy path)
+            address = hl_config.get("address")
+            if not address:
+                return False, f"No address configured for {exchange_type.value}", context
+
+            self.address = address
+            context["using_exchange_manager"] = False
+        else:
+            context["using_exchange_manager"] = True
+            # For multi-exchange, get config from exchange-specific section
+            exchange_config = config.get(exchange_type.value, config.get("hyperliquid", {}))
+            # No address needed - ExchangeManager has credentials
+
+        # Get account state (uses ExchangeManager if available)
+        account_value = await self.get_account_value(exchange_type if using_exchange_manager else None)
         context["account_value"] = account_value
 
         if account_value <= 0:
-            return False, "No account value", context
+            return False, f"No account value on {exchange_type.value}", context
 
         # Fetch account state with retry (kill switch check, sizing, circuit breaker)
         try:
-            account_state = await self.get_account_state_with_retry()
+            account_state = await self.get_account_state_with_retry(
+                exchange_type if using_exchange_manager else None
+            )
             context["account_state"] = account_state
 
             # Quick kill switch check (does NOT validate proposed size - that comes after sizing)
@@ -335,24 +472,29 @@ class HyperliquidExecutor:
             if governor.is_kill_switch_active():
                 increment_safety_block("kill_switch")
                 return False, "Risk governor: Kill switch active", context
+
+            # Update risk governor with exchange-specific state (Phase 6)
+            governor.update_positions_from_account_state(account_state, exchange_type.value)
         except Exception as e:
             # Fail-closed: block execution when account state unavailable after retries
-            print(f"[executor] Account state fetch failed after retries: {e}")
+            print(f"[executor] Account state fetch from {exchange_type.value} failed after retries: {e}")
             increment_safety_block("account_state")
             return False, f"Account state unavailable: {e}", context
 
         # Check exposure limit
-        current_exposure = await self.get_current_exposure()
+        current_exposure = await self.get_current_exposure(exchange_type if using_exchange_manager else None)
         context["exposure_before"] = current_exposure
 
-        max_exposure = hl_config.get("max_exposure_pct", 10) / 100  # Convert from % to decimal
+        # Get exposure config from exchange-specific or hyperliquid section
+        exchange_config = config.get(exchange_type.value, config.get("hyperliquid", {}))
+        max_exposure = exchange_config.get("max_exposure_pct", 10) / 100  # Convert from % to decimal
         if current_exposure >= max_exposure:
-            return False, f"Exposure {current_exposure:.1%} >= {max_exposure:.1%} limit", context
+            return False, f"Exposure {current_exposure:.1%} >= {max_exposure:.1%} limit on {exchange_type.value}", context
 
-        # Get price
-        mid_price = await self.get_mid_price(symbol)
+        # Get price (uses ExchangeManager if available)
+        mid_price = await self.get_mid_price(symbol, exchange_type if using_exchange_manager else None)
         if not mid_price or mid_price <= 0:
-            return False, f"Could not get price for {symbol}", context
+            return False, f"Could not get price for {symbol} on {exchange_type.value}", context
         context["price"] = mid_price
 
         # Calculate position size - Kelly or fixed
@@ -375,6 +517,12 @@ class HyperliquidExecutor:
                 print(f"[executor] Failed to get regime for Kelly adjustment: {e}")
                 context["regime"] = "unknown"
 
+            # Get per-exchange fee config for Kelly sizing (Phase 6)
+            fee_config = get_fee_config(exchange_type)
+            # Round-trip cost as fraction (e.g., 10 bps = 0.001)
+            round_trip_fee_pct = fee_config.round_trip_cost_bps() / 10000
+            context["round_trip_fee_bps"] = fee_config.round_trip_cost_bps()
+
             kelly_result = await get_consensus_kelly_size(
                 db,
                 addresses=consensus_addresses,
@@ -382,6 +530,7 @@ class HyperliquidExecutor:
                 current_price=mid_price,
                 stop_distance_pct=stop_distance_pct,
                 fraction=kelly_fraction,
+                round_trip_fee_pct=round_trip_fee_pct,
             )
             context["kelly_result"] = kelly_result
             position_pct = kelly_result.position_pct
@@ -399,6 +548,70 @@ class HyperliquidExecutor:
         context["size_coin"] = size_coin
         context["size_usd"] = size_usd
         context["position_pct"] = position_pct
+
+        # Re-calculate slippage with actual Kelly-sized position (Phase 6.1 Gap Fix)
+        # Consensus detection uses reference $10k size; we now know actual size.
+        try:
+            from .consensus import get_slippage_estimate_bps_sync, calculate_ev, get_exchange_fees_bps
+            from .consensus import get_funding_cost_bps_sync, CONSENSUS_EV_MIN_R
+            from .consensus import DEFAULT_AVG_WIN_R, DEFAULT_AVG_LOSS_R, get_dynamic_hold_hours_sync
+
+            asset = symbol.split("-")[0] if "-" in symbol else symbol.replace("USDC", "")
+            actual_slippage_bps = get_slippage_estimate_bps_sync(
+                asset=asset,
+                exchange=exchange_type.value,
+                order_size_usd=size_usd,  # Use Kelly-sized position
+            )
+            context["actual_slippage_bps"] = actual_slippage_bps
+
+            # Get dynamic hold time from episode data (Phase 6.1)
+            hold_hours = get_dynamic_hold_hours_sync(asset)
+            context["hold_hours"] = hold_hours
+
+            # Re-calculate EV with actual slippage to validate signal still passes
+            fees_bps = get_exchange_fees_bps(exchange_type.value)
+            funding_bps = get_funding_cost_bps_sync(
+                asset=asset,
+                exchange=exchange_type.value,
+                hold_hours=hold_hours,
+                side=direction,
+            )
+
+            # Calculate stop price for EV calculation
+            stop_pct = stop_distance_pct or 0.02
+            if direction == "long":
+                stop_price = mid_price * (1 - stop_pct)
+            else:
+                stop_price = mid_price * (1 + stop_pct)
+
+            # Estimate p_win from Kelly result if available
+            p_win = 0.55  # Default conservative estimate
+            if kelly_result and kelly_result.full_kelly > 0:
+                # Reverse-engineer p_win from Kelly formula: f = p - (1-p)/R
+                # With R = avg_win/avg_loss, approximate p_win
+                p_win = min(0.70, 0.50 + kelly_result.full_kelly * 0.5)
+
+            ev_result = calculate_ev(
+                p_win=p_win,
+                entry_px=mid_price,
+                stop_px=stop_price,
+                avg_win_r=DEFAULT_AVG_WIN_R,
+                avg_loss_r=DEFAULT_AVG_LOSS_R,
+                fees_bps=fees_bps,
+                slip_bps=actual_slippage_bps,
+                funding_bps=funding_bps,
+            )
+            context["actual_ev_net_r"] = ev_result["ev_net_r"]
+            context["actual_ev_cost_r"] = ev_result["ev_cost_r"]
+
+            # Reject if actual slippage pushes EV below minimum
+            if ev_result["ev_net_r"] < CONSENSUS_EV_MIN_R:
+                return False, f"EV {ev_result['ev_net_r']:.3f}R < minimum {CONSENSUS_EV_MIN_R:.3f}R after Kelly sizing (slippage={actual_slippage_bps:.1f}bps)", context
+
+            print(f"[executor] Slippage recalc: reference→actual: ${size_usd:.0f} order = {actual_slippage_bps:.1f}bps, EV={ev_result['ev_net_r']:.3f}R")
+        except Exception as e:
+            # Non-fatal: continue with execution if slippage recalc fails
+            print(f"[executor] Slippage recalculation failed (non-fatal): {e}")
 
         # Calculate new exposure
         new_exposure = current_exposure + (size_usd / account_value)
@@ -431,9 +644,8 @@ class HyperliquidExecutor:
             governor = get_risk_governor(db)
 
             # Update position counts from account state using public method (reuse cached)
-            account_state = context.get("account_state")
-            if account_state:
-                governor.update_positions_from_account_state(account_state)
+            # Note: Already updated earlier in validate_execution with exchange info
+            exchange_name = context.get("exchange", "hyperliquid")
 
             # Pass per-symbol count for future multi-position support
             symbol_position_count = governor.get_symbol_position_count(symbol)
@@ -559,8 +771,7 @@ class HyperliquidExecutor:
                             kelly_result=kelly_result,
                         )
 
-                        # Register stop with StopManager
-                        # Note: exchange tracking will be added in Phase 6.2
+                        # Register stop with StopManager (Phase 6: exchange-aware)
                         try:
                             from .stop_manager import get_stop_manager
                             stop_manager = get_stop_manager(db)
@@ -572,6 +783,7 @@ class HyperliquidExecutor:
                                 entry_price=order_result.fill_price,
                                 entry_size=order_result.fill_size,
                                 stop_distance_pct=stop_pct,
+                                exchange=exchange_type.value,
                             )
                         except Exception as e:
                             print(f"[executor] Failed to register stop: {e}")
@@ -627,7 +839,7 @@ class HyperliquidExecutor:
                                 kelly_result=kelly_result,
                             )
 
-                            # Register stop with StopManager
+                            # Register stop with StopManager (legacy path uses hyperliquid)
                             try:
                                 from .stop_manager import get_stop_manager
                                 stop_manager = get_stop_manager(db)
@@ -639,6 +851,7 @@ class HyperliquidExecutor:
                                     entry_price=order_result.fill_price,
                                     entry_size=order_result.fill_size,
                                     stop_distance_pct=stop_pct,
+                                    exchange="hyperliquid",  # Legacy path
                                 )
                             except Exception as e:
                                 print(f"[executor] Failed to register stop: {e}")

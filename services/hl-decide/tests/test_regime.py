@@ -232,7 +232,7 @@ class TestRegimeDetector:
         assert price_range == 15.0  # 110 - 95
 
     def test_cache_behavior(self, detector):
-        """Test caching of regime analysis."""
+        """Test caching of regime analysis with exchange-aware keys."""
         analysis = RegimeAnalysis(
             asset="BTC",
             regime=MarketRegime.TRENDING,
@@ -244,13 +244,16 @@ class TestRegimeDetector:
             timestamp=datetime.now(timezone.utc),
             candles_used=60,
             source="full",
+            exchange="hyperliquid",
         )
 
-        detector._cache_result("BTC", analysis)
-        cached = detector._get_cached("BTC")
+        # Use new exchange-aware cache key format
+        detector._cache_result("BTC:hyperliquid", analysis)
+        cached = detector._get_cached("BTC:hyperliquid")
 
         assert cached is not None
         assert cached.regime == MarketRegime.TRENDING
+        assert cached.exchange == "hyperliquid"
 
     def test_cache_expiry(self, detector):
         """Test cache expires after TTL."""
@@ -265,17 +268,18 @@ class TestRegimeDetector:
             timestamp=datetime.now(timezone.utc),
             candles_used=60,
             source="full",
+            exchange="hyperliquid",
         )
 
-        # Cache with old timestamp
+        # Cache with old timestamp using new key format
         old_time = datetime.now(timezone.utc) - timedelta(seconds=120)
-        detector._cache["BTC"] = (analysis, old_time)
+        detector._cache["BTC:hyperliquid"] = (analysis, old_time)
 
-        cached = detector._get_cached("BTC")
+        cached = detector._get_cached("BTC:hyperliquid")
         assert cached is None  # Should be expired
 
     def test_clear_cache(self, detector):
-        """Test cache clearing."""
+        """Test cache clearing with exchange-aware keys."""
         analysis = RegimeAnalysis(
             asset="BTC",
             regime=MarketRegime.TRENDING,
@@ -287,14 +291,16 @@ class TestRegimeDetector:
             timestamp=datetime.now(timezone.utc),
             candles_used=60,
             source="full",
+            exchange="hyperliquid",
         )
 
-        detector._cache_result("BTC", analysis)
-        detector._cache_result("ETH", analysis)
+        # Use new exchange-aware cache key format
+        detector._cache_result("BTC:hyperliquid", analysis)
+        detector._cache_result("ETH:hyperliquid", analysis)
 
-        detector.clear_cache("BTC")
-        assert "BTC" not in detector._cache
-        assert "ETH" in detector._cache
+        detector.clear_cache("BTC")  # Should clear all BTC entries
+        assert "BTC:hyperliquid" not in detector._cache
+        assert "ETH:hyperliquid" in detector._cache
 
         detector.clear_cache()
         assert len(detector._cache) == 0
@@ -500,3 +506,206 @@ class TestQuantAcceptance:
                 price_range_pct=price_range,
             )
             assert 0.0 <= confidence <= 1.0
+
+
+# =============================================================================
+# Multi-Exchange Regime Detection Tests (Phase 6.1)
+# =============================================================================
+
+
+class TestMultiExchangeRegimeDetection:
+    """Tests for multi-exchange regime detection (Phase 6.1 Gap 3 fix)."""
+
+    def test_detector_accepts_exchange_parameter(self):
+        """Detector can be initialized with default exchange."""
+        detector = RegimeDetector(db=None, default_exchange="bybit")
+        assert detector.default_exchange == "bybit"
+
+    def test_detector_defaults_to_hyperliquid(self):
+        """Detector defaults to hyperliquid if no exchange specified."""
+        detector = RegimeDetector(db=None)
+        assert detector.default_exchange == "hyperliquid"
+
+    def test_regime_analysis_includes_exchange(self):
+        """RegimeAnalysis includes exchange field."""
+        analysis = RegimeAnalysis(
+            asset="BTC",
+            regime=MarketRegime.TRENDING,
+            params=REGIME_PARAMS[MarketRegime.TRENDING],
+            confidence=0.8,
+            ma_spread_pct=0.03,
+            volatility_ratio=1.0,
+            price_range_pct=0.02,
+            timestamp=datetime.now(timezone.utc),
+            candles_used=60,
+            source="full",
+            exchange="bybit",
+        )
+        assert analysis.exchange == "bybit"
+
+    def test_regime_analysis_to_dict_includes_exchange(self):
+        """RegimeAnalysis.to_dict() includes exchange."""
+        analysis = RegimeAnalysis(
+            asset="BTC",
+            regime=MarketRegime.TRENDING,
+            params=REGIME_PARAMS[MarketRegime.TRENDING],
+            confidence=0.8,
+            ma_spread_pct=0.03,
+            volatility_ratio=1.0,
+            price_range_pct=0.02,
+            timestamp=datetime.now(timezone.utc),
+            candles_used=60,
+            source="full",
+            exchange="bybit",
+        )
+        result = analysis.to_dict()
+        assert result["exchange"] == "bybit"
+
+    def test_cache_key_includes_exchange(self):
+        """Cache keys include exchange for separate caching."""
+        detector = RegimeDetector(db=None)
+
+        btc_hl = RegimeAnalysis(
+            asset="BTC", regime=MarketRegime.TRENDING,
+            params=REGIME_PARAMS[MarketRegime.TRENDING], confidence=0.8,
+            ma_spread_pct=0.03, volatility_ratio=1.0, price_range_pct=0.02,
+            timestamp=datetime.now(timezone.utc), candles_used=60,
+            source="full", exchange="hyperliquid",
+        )
+        btc_bybit = RegimeAnalysis(
+            asset="BTC", regime=MarketRegime.RANGING,  # Different regime
+            params=REGIME_PARAMS[MarketRegime.RANGING], confidence=0.7,
+            ma_spread_pct=0.01, volatility_ratio=0.8, price_range_pct=0.01,
+            timestamp=datetime.now(timezone.utc), candles_used=55,
+            source="full", exchange="bybit",
+        )
+
+        detector._cache_result("BTC:hyperliquid", btc_hl)
+        detector._cache_result("BTC:bybit", btc_bybit)
+
+        # Both should be cached separately
+        assert "BTC:hyperliquid" in detector._cache
+        assert "BTC:bybit" in detector._cache
+        assert detector._get_cached("BTC:hyperliquid").regime == MarketRegime.TRENDING
+        assert detector._get_cached("BTC:bybit").regime == MarketRegime.RANGING
+
+    def test_clear_cache_by_asset_clears_all_exchanges(self):
+        """Clearing cache by asset clears all exchange variants."""
+        detector = RegimeDetector(db=None)
+
+        btc_hl = RegimeAnalysis(
+            asset="BTC", regime=MarketRegime.TRENDING,
+            params=REGIME_PARAMS[MarketRegime.TRENDING], confidence=0.8,
+            ma_spread_pct=0.03, volatility_ratio=1.0, price_range_pct=0.02,
+            timestamp=datetime.now(timezone.utc), candles_used=60,
+            source="full", exchange="hyperliquid",
+        )
+        btc_bybit = RegimeAnalysis(
+            asset="BTC", regime=MarketRegime.RANGING,
+            params=REGIME_PARAMS[MarketRegime.RANGING], confidence=0.7,
+            ma_spread_pct=0.01, volatility_ratio=0.8, price_range_pct=0.01,
+            timestamp=datetime.now(timezone.utc), candles_used=55,
+            source="full", exchange="bybit",
+        )
+        eth_hl = RegimeAnalysis(
+            asset="ETH", regime=MarketRegime.VOLATILE,
+            params=REGIME_PARAMS[MarketRegime.VOLATILE], confidence=0.9,
+            ma_spread_pct=0.02, volatility_ratio=2.0, price_range_pct=0.04,
+            timestamp=datetime.now(timezone.utc), candles_used=60,
+            source="full", exchange="hyperliquid",
+        )
+
+        detector._cache_result("BTC:hyperliquid", btc_hl)
+        detector._cache_result("BTC:bybit", btc_bybit)
+        detector._cache_result("ETH:hyperliquid", eth_hl)
+
+        # Clear only BTC entries
+        detector.clear_cache(asset="BTC")
+
+        assert "BTC:hyperliquid" not in detector._cache
+        assert "BTC:bybit" not in detector._cache
+        assert "ETH:hyperliquid" in detector._cache
+
+    def test_clear_cache_by_asset_and_exchange(self):
+        """Clearing cache with specific asset and exchange clears only that entry."""
+        detector = RegimeDetector(db=None)
+
+        btc_hl = RegimeAnalysis(
+            asset="BTC", regime=MarketRegime.TRENDING,
+            params=REGIME_PARAMS[MarketRegime.TRENDING], confidence=0.8,
+            ma_spread_pct=0.03, volatility_ratio=1.0, price_range_pct=0.02,
+            timestamp=datetime.now(timezone.utc), candles_used=60,
+            source="full", exchange="hyperliquid",
+        )
+        btc_bybit = RegimeAnalysis(
+            asset="BTC", regime=MarketRegime.RANGING,
+            params=REGIME_PARAMS[MarketRegime.RANGING], confidence=0.7,
+            ma_spread_pct=0.01, volatility_ratio=0.8, price_range_pct=0.01,
+            timestamp=datetime.now(timezone.utc), candles_used=55,
+            source="full", exchange="bybit",
+        )
+
+        detector._cache_result("BTC:hyperliquid", btc_hl)
+        detector._cache_result("BTC:bybit", btc_bybit)
+
+        # Clear only BTC:bybit
+        detector.clear_cache(asset="BTC", exchange="bybit")
+
+        assert "BTC:hyperliquid" in detector._cache
+        assert "BTC:bybit" not in detector._cache
+
+    @pytest.mark.asyncio
+    async def test_detect_regime_with_exchange_parameter(self):
+        """detect_regime accepts exchange parameter."""
+        mock_pool = MagicMock()
+        mock_conn = AsyncMock()
+        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
+
+        # Create trending market data
+        base_price = 100000
+        candle_data = []
+        for i in range(60):
+            price = base_price * (1 + 0.001 * i)  # Uptrend
+            candle_data.append({
+                "ts": datetime.now(timezone.utc) - timedelta(minutes=60-i),
+                "mid": price,
+                "high": price * 1.002,
+                "low": price * 0.998,
+                "close": price,
+            })
+
+        mock_conn.fetch.return_value = candle_data
+        detector = RegimeDetector(db=mock_pool, default_exchange="hyperliquid")
+
+        # Should use exchange-specific cache key
+        analysis = await detector.detect_regime("BTC", exchange="hyperliquid")
+
+        assert analysis.exchange == "hyperliquid"
+        assert "BTC:hyperliquid" in detector._cache
+
+    def test_unknown_regime_includes_exchange(self):
+        """Unknown regime analysis includes exchange field."""
+        detector = RegimeDetector(db=None)
+        analysis = detector._create_unknown_regime("BTC", 5, "bybit")
+
+        assert analysis.exchange == "bybit"
+        assert analysis.regime == MarketRegime.UNKNOWN
+
+    def test_candles_to_dicts_conversion(self):
+        """_candles_to_dicts converts Candle objects to dicts."""
+        from app.atr_provider.interface import Candle
+
+        detector = RegimeDetector(db=None)
+        candles = [
+            Candle(ts=datetime.now(timezone.utc), open=100, high=105, low=98, close=103),
+            Candle(ts=datetime.now(timezone.utc), open=103, high=108, low=101, close=106),
+        ]
+
+        dicts = detector._candles_to_dicts(candles)
+
+        assert len(dicts) == 2
+        assert dicts[0]["open"] == 100
+        assert dicts[0]["high"] == 105
+        assert dicts[0]["low"] == 98
+        assert dicts[0]["close"] == 103
+        assert dicts[1]["close"] == 106
