@@ -20,7 +20,7 @@ sizing or risk calculations.
 from dataclasses import dataclass
 from typing import Optional, Dict
 
-from app.exchanges.interface import Balance, Position
+from .exchanges.interface import Balance, Position
 
 
 @dataclass
